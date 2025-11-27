@@ -67,7 +67,7 @@ class SerialHVDevice:
                 raise Exception("Failed to disable HV output")
 
     def write_cmd(self, cmd):
-        cmd_e=cmd.encode()
+        cmd_e=cmd.encode('utf-8')
         self._serial.write(cmd_e)
 
     def chk_sum(self, a):
@@ -88,9 +88,9 @@ class SerialHVDevice:
         Example placeholder: b'SETV:1234.56\n'
         """
         #    st=chr(2)+'0106V1='+"{:07.1f}".format(voltage)+'{:X}'.format(chk_sum('0106V1='+"{:07.1f}".format(voltage)))+chr(10)
-        cmd = chr(2) + '0106V1=' + "{:07.1f}".format(voltage) + '{:X}'.format(self.chk_sum('0106V1=' + "{:07.1f}".format(voltage))) + chr(10)
+        cmd = '0106V1=' + "{:07.1f}".format(voltage) + '{:X}'.format(self.chk_sum('0106V1=' + "{:07.1f}".format(voltage))) + '\n'
 
-        return cmd.encode('ascii')
+        return cmd
 
     def get_voltage(self) -> float:
         #get voltage, but not implemented yet
@@ -115,15 +115,15 @@ class SerialHVDevice:
                 )
                 
                 # Send command
-                bytes_written = serial_obj.write(cmd)
+                bytes_written = serial_obj.write(cmd.encode('utf-8'))
                 serial_obj.flush()  # Ensure data is sent
                 print(f"HV command written: {cmd} ({bytes_written} bytes)")
                 self._voltage = v  # Update stored voltage
                 time.sleep(0.1)
                 # Send disable command
-                disable_cmd = chr(2) + '0106EN=0' + '{:X}'.format(self.chk_sum('0106EN=0')) + chr(10)
+                disable_cmd = '0106EN=0' + '{:X}'.format(self.chk_sum('0106EN=0')) + '\n'
                 print(f"Sending disable command: {disable_cmd}")
-                serial_obj.write(disable_cmd.encode())
+                serial_obj.write(disable_cmd.encode('utf-8'))
                 serial_obj.flush()
                 
             except Exception as e:
