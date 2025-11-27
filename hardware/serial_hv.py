@@ -134,6 +134,7 @@ class SerialHVDevice:
             finally:
                 # Always close the port
                 if serial_obj is not None:
+                    time.sleep(0.1)
                     try:
                         serial_obj.close()
                         print(f"Serial port closed: {self.port}")
