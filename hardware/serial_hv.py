@@ -119,7 +119,7 @@ class SerialHVDevice:
                 serial_obj.flush()  # Ensure data is sent
                 print(f"HV command written: {cmd} ({bytes_written} bytes)")
                 self._voltage = v  # Update stored voltage
-                
+                time.sleep(0.1)
                 # Send disable command
                 disable_cmd = chr(2) + '0106EN=0' + '{:X}'.format(self.chk_sum('0106EN=0')) + chr(10)
                 print(f"Sending disable command: {disable_cmd}")
