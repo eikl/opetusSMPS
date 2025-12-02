@@ -1,0 +1,5 @@
+matplotlib==3.10.7
+pyserial==3.5
+sensirion_i2c_driver==1.0.2
+sensirion_i2c_sdp==0.1.1
+simple_pid==2.0.1
