@@ -42,8 +42,8 @@ class SerialHVDevice:
                 self._serial = serial.Serial(
                     self.port, 
                     self.baud, 
-                    timeout=0.5,
-                    write_timeout=1.0,  # Add write timeout
+                    timeout=1,
+                    write_timeout=1,  # Add write timeout
                     bytesize=serial.EIGHTBITS,
                     parity=serial.PARITY_NONE,
                     stopbits=serial.STOPBITS_ONE
@@ -55,20 +55,21 @@ class SerialHVDevice:
                 self._connected = False
                 raise
 
-    def disable(self) -> None:
-        with self._lock:
+    def disable(self, ser) -> None:
+        try:
+            st=chr(2)+'0106EN=0'+'{:X}'.format(self.chk_sum('0106EN=0'))+chr(10)
 
-            try:
-                st=chr(2)+'0106EN=0'+'{:X}'.format(self.chk_sum('0106EN=0'))+chr(10)
-                print(st)
-                self.write_cmd(st)
+            self.write_cmd(st, ser)
 
-            except Exception:
-                raise Exception("Failed to disable HV output")
+        except Exception:
+            raise Exception("Failed to disable HV output")
 
-    def write_cmd(self, cmd):
+    def write_cmd(self, cmd, ser):
         cmd_e=cmd.encode()
-        self._serial.write(cmd_e)
+        ser.write(cmd_e)
+        print(cmd_e)
+        ser.flush()
+        #time.sleep(0.1)
 
     def chk_sum(self, a):
         sum_c=0
@@ -82,26 +83,34 @@ class SerialHVDevice:
         return sum_c
 
     def _format_set_command(self, voltage: float) -> bytes:
-        """Format the serial command to set voltage for your HV supply.
 
-        Replace this with device-specific formatting.
-        Example placeholder: b'SETV:1234.56\n'
-        """
         #    st=chr(2)+'0106V1='+"{:07.1f}".format(voltage)+'{:X}'.format(chk_sum('0106V1='+"{:07.1f}".format(voltage)))+chr(10)
         cmd = chr(2) + '0106V1=' + "{:07.1f}".format(voltage) + '{:X}'.format(self.chk_sum('0106V1=' + "{:07.1f}".format(voltage))) + chr(10)
-
-        return cmd.encode('ascii')
+        print('voltage set cmd')
+        return cmd
 
     def get_voltage(self) -> float:
         #get voltage, but not implemented yet
         return 10
+
+    def read_spellman(self, ser):
+        res = ser.readline()
+        print('response')
+        print(res)
+        ser.flush()
+        return res
     
+    def set_enable(self, ser):
+        st=chr(2)+'0106EN=1'+'{:X}'.format(self.chk_sum('0106EN=1'))+chr(10)
+        #print(st)
+        print('enable cmd')
+        self.write_cmd(st, ser)
+        #print(self.read_spellman(ser))
+
     def set_voltage(self, voltage: float) -> None:
         """Set the HV output voltage. Connects, sends command, then disconnects."""
         with self._lock:
             v = int(voltage)
-            cmd = self._format_set_command(v)
-            
             # Always open fresh connection for each command
             serial_obj = None
             try:
@@ -110,21 +119,20 @@ class SerialHVDevice:
                 serial_obj = serial.Serial(
                     self.port, 
                     self.baud, 
-                    timeout=0.5,
-                    write_timeout=1.0
+                    timeout=10,
+                    write_timeout=10
                 )
-                
+                #send enable cmd
+                #self.set_enable(serial_obj)
+
                 # Send command
-                bytes_written = serial_obj.write(cmd)
-                serial_obj.flush()  # Ensure data is sent
-                print(f"HV command written: {cmd} ({bytes_written} bytes)")
+                cmd = self._format_set_command(v)
+                self.write_cmd(cmd, serial_obj)
+                #self.disable(serial_obj)
+                res = self.read_spellman(serial_obj)
                 self._voltage = v  # Update stored voltage
-                time.sleep(0.1)
-                # Send disable command
-                disable_cmd = chr(2) + '0106EN=0' + '{:X}'.format(self.chk_sum('0106EN=0')) + chr(10)
-                print(f"Sending disable command: {disable_cmd}")
-                serial_obj.write(disable_cmd.encode())
-                serial_obj.flush()
+                
+
                 
             except Exception as e:
                 print(f"Error in HV command: {e}")
@@ -145,3 +153,4 @@ class SerialHVDevice:
 
 # default device instance: instantiate real serial-backed device by default
 device = SerialHVDevice()
+

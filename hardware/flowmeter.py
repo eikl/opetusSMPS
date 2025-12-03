@@ -1,150 +1,241 @@
-"""Hardware adapter for flowmeter devices.
+"""Flowmeter hardware adapter.
 
-This module selects between a simulator (`flowmeter.MassFlowMeter`) and a
-serial-backed implementation using an external library such as
-`sensirion_uart_sfx6xxx` when configured via the .env keys:
+Provides `device` which is either an I2C-backed Sensirion SFM3000 sensor or a dummy
+implementation. Selection is controlled by the environment variable `USE_I2C_FLOWMETER`.
 
-- USE_SERIAL_MASSFLOW: 'true' to request real hardware (no silent fallback)
-- MASSFLOW_PYLIB_MODULE: python module name for the vendor library
-- MASSFLOW_PYLIB_CLASS: class name to instantiate from that module
-- MASSFLOW_SERIAL_PORT, MASSFLOW_SERIAL_BAUD: connection params
-
-If `USE_SERIAL_MASSFLOW` is true but the requested library cannot be
-imported/instantiated, this module will raise a RuntimeError so the caller
-knows the connection failed (no silent fallback to simulation).
+Interface:
+- step(dt: Optional[float] = None) -> None
+- get_flow() -> float
 """
-from config import get_str, get_float
-import importlib
-import logging
+import threading
+from typing import Optional
 
-from flowmeter import MassFlowMeter
-
-
-def _str_to_bool(s: str) -> bool:
-    return str(s).lower() in ('1', 'true', 'yes', 'on')
+from config import get_str, get_int, get_float
 
 
-class SerialMassFlowAdapter:
-    """Adapter that wraps a vendor Python library device instance and
-    provides the `get_flow()` and optional `step()` interface expected by
-    controllers.
-
-    This wrapper attempts to call common API names exposed by vendor libs,
-    such as `get_mass_flow`, `read_mass_flow`, or `read`.
+class SFM3000FlowmeterDevice:
+    """Sensirion SFM3000 I2C flowmeter device.
+    
+    Interface:
+    - step(dt: Optional[float] = None) -> None
+    - get_flow() -> float
     """
-
-    def __init__(self, lib_module, lib_device):
-        self.lib_module = lib_module
-        self.lib_device = lib_device
-
-    def step(self, dt=None):
-        # real device: nothing to advance; simulator libs may provide polling
-        try:
-            if hasattr(self.lib_device, 'poll'):
-                try:
-                    self.lib_device.poll()
-                except TypeError:
-                    # maybe poll takes a timeout
-                    try:
-                        self.lib_device.poll(dt)
-                    except Exception:
-                        pass
-        except Exception:
-            logging.exception('Error in SerialMassFlowAdapter.step')
-
-    def get_flow(self) -> float:
-        # try several common method names
-        candidates = ['get_mass_flow', 'read_mass_flow', 'read_flow', 'get_flow', 'read']
-        for name in candidates:
-            fn = getattr(self.lib_device, name, None)
-            if callable(fn):
-                try:
-                    val = fn()
-                    # some libs return a tuple (value, unit)
-                    if isinstance(val, (list, tuple)) and val:
-                        return float(val[0])
-                    return float(val)
-                except Exception:
-                    # try next candidate
-                    logging.debug('SerialMassFlowAdapter: method %s exists but raised', name)
-                    continue
-        # last resort: try reading attributes
-        for attr in ('mass_flow', 'flow', 'value'):
-            v = getattr(self.lib_device, attr, None)
-            if v is not None:
-                try:
-                    return float(v)
-                except Exception:
-                    pass
-        raise RuntimeError('Serial massflow device does not expose a readable flow API')
-
-
-# Decide which implementation to expose as `device`
-_use_serial = _str_to_bool(get_str('USE_SERIAL_MASSFLOW', 'false'))
-port = get_str('MASSFLOW_SERIAL_PORT', None) or None
-
-if _use_serial and port:
-    # Use serial adapter only when port is configured
-    pass  # will be handled in else block below
-else:
-    # Use dummy device when serial not requested or no port configured
-    from hardware.dummy_devices import DummyFlowmeterDevice
-    device = DummyFlowmeterDevice()
-
-if _use_serial and port:
-    # attempt to instantiate vendor library
-    module_name = get_str('MASSFLOW_PYLIB_MODULE', 'sensirion_uart_sfx6xxx')
-    class_name = get_str('MASSFLOW_PYLIB_CLASS', '')
-    port = get_str('MASSFLOW_SERIAL_PORT', '/dev/ttyUSB0')
-    baud = int(get_str('MASSFLOW_SERIAL_BAUD', '9600') or 9600)
-    try:
-        lib = importlib.import_module(module_name)
-    except Exception as e:
-        raise RuntimeError(f"Requested serial massflow library '{module_name}' not found: {e}\nPlease install it or set USE_SERIAL_MASSFLOW=false in .env")
-
-    # try to find a class to instantiate
-    lib_device = None
-    if class_name:
-        cls = getattr(lib, class_name, None)
-        if cls is None:
-            raise RuntimeError(f"Library '{module_name}' does not expose class '{class_name}'")
-        try:
-            # try common constructor signatures
+    
+    def __init__(
+        self,
+        i2c_bus: int = 1,
+        i2c_address: int = 0x40,
+        scale_factor: float = 140.0,
+        offset: float = 32000.0
+    ):
+        """Initialize SFM3000 flowmeter.
+        
+        Args:
+            i2c_bus: I2C bus number (default 1 for Raspberry Pi)
+            i2c_address: I2C address (default 0x40)
+            scale_factor: Flow scale factor (default 140.0 for SFM3000)
+            offset: Flow offset (default 32000.0 for SFM3000)
+        """
+        from hardware.sensirionsfm3000 import (
+            SensirionI2CSfm3000,
+            SensirionI2CError,
+            NackError,
+            CrcError
+        )
+        
+        self._lock = threading.Lock()
+        self._sensor = SensirionI2CSfm3000()
+        self._i2c_bus = i2c_bus
+        self._i2c_address = i2c_address
+        self._scale_factor = scale_factor
+        self._offset = offset
+        self._flow = 0.0
+        self._connected = False
+        self._error_count = 0
+        self._max_errors = 5  # Hard reset after this many consecutive errors
+        
+        # Store exception classes for error handling
+        self._SensirionI2CError = SensirionI2CError
+        self._NackError = NackError
+        self._CrcError = CrcError
+    
+    def connect(self) -> bool:
+        """Connect to the sensor and start measurements.
+        
+        Returns:
+            True if connection successful, False otherwise
+        """
+        with self._lock:
             try:
-                lib_device = cls(port, baud)
-            except TypeError:
+                self._sensor.begin(
+                    i2c_bus=self._i2c_bus,
+                    i2c_address=self._i2c_address
+                )
+                
+                # Try to read serial number to verify communication
+                serial = self._sensor.read_serial_number()
+                print(f"SFM3000 connected - Serial: {serial} (0x{serial:08X})")
+                
+                # Try to read scale factor and offset from sensor
                 try:
-                    lib_device = cls(port)
-                except TypeError:
-                    lib_device = cls()
-        except Exception as e:
-            raise RuntimeError(f"Failed to instantiate {class_name} from {module_name}: {e}")
-    else:
-        # try some common factory points in the module
-        # user can set MASSFLOW_PYLIB_CLASS in .env to guide us
-        possible = []
-        for name in dir(lib):
-            if 'sfx' in name.lower() or 'mass' in name.lower() or 'flow' in name.lower():
-                possible.append(name)
-        # try to instantiate any callable candidate
-        inst = None
-        for name in possible:
-            candidate = getattr(lib, name)
-            if callable(candidate):
-                try:
-                    try:
-                        inst = candidate(port, baud)
-                    except TypeError:
-                        try:
-                            inst = candidate(port)
-                        except TypeError:
-                            inst = candidate()
-                    break
+                    sf = self._sensor.read_scale_factor()
+                    off = self._sensor.read_offset()
+                    if sf != 0:
+                        self._scale_factor = float(sf)
+                        self._offset = float(off)
+                        print(f"SFM3000 using sensor calibration: scale={sf}, offset={off}")
                 except Exception:
-                    continue
-        if inst is None:
-            raise RuntimeError(f"Could not find an instantiable device class in module '{module_name}'. Please set MASSFLOW_PYLIB_CLASS in .env to the correct class name.")
-        lib_device = inst
+                    print(f"SFM3000 using default calibration: scale={self._scale_factor}, offset={self._offset}")
+                
+                # Start continuous measurement
+                self._sensor.start_continuous_measurement()
+                self._connected = True
+                self._error_count = 0
+                return True
+                
+            except Exception as e:
+                print(f"SFM3000 connection failed: {e}")
+                self._connected = False
+                return False
+    
+    def disconnect(self) -> None:
+        """Disconnect from the sensor."""
+        with self._lock:
+            try:
+                self._sensor.close()
+            except Exception:
+                pass
+            self._connected = False
+    
+    def step(self, dt: Optional[float] = None) -> None:
+        """Update flow reading from sensor.
+        
+        This method reads the latest flow value from the sensor.
+        Should be called periodically (e.g., every 100ms).
+        
+        Args:
+            dt: Time step (unused, for interface compatibility)
+        """
+        with self._lock:
+            if not self._connected:
+                return
+            
+            try:
+                self._flow = self._sensor.read_measurement(
+                    scaling_factor=self._scale_factor,
+                    offset=self._offset
+                )
+                self._error_count = 0  # Reset error count on success
+                
+            except self._NackError:
+                # No valid measurement ready yet, keep last value
+                pass
+                
+            except (self._CrcError, self._SensirionI2CError) as e:
+                self._error_count += 1
+                print(f"SFM3000 read error ({self._error_count}/{self._max_errors}): {e}")
+                
+                if self._error_count >= self._max_errors:
+                    print("SFM3000: Too many errors, attempting reconnect...")
+                    self._connected = False
+                    # Try to reconnect
+                    try:
+                        self._sensor.soft_reset()
+                        self._sensor.start_continuous_measurement()
+                        self._connected = True
+                        self._error_count = 0
+                    except Exception as e2:
+                        print(f"SFM3000 reconnect failed: {e2}")
+                        
+            except Exception as e:
+                self._error_count += 1
+                print(f"SFM3000 unexpected error: {e}")
+    
+    def get_flow(self) -> float:
+        """Return the last measured flow value in slm (standard liters per minute).
+        
+        Returns:
+            Flow rate in slm
+        """
+        with self._lock:
+            return float(self._flow)
+    
+    def is_connected(self) -> bool:
+        """Check if sensor is connected."""
+        with self._lock:
+            return self._connected
 
-    # wrap and expose
-    device = SerialMassFlowAdapter(lib, lib_device)
+
+class DummyFlowmeterDevice:
+    """Dummy flowmeter device that returns a constant flow value.
+    
+    Interface:
+    - step(dt: Optional[float] = None) -> None
+    - get_flow() -> float
+    """
+    
+    def __init__(self):
+        self._lock = threading.Lock()
+        self._flow = 1.5  # constant placeholder flow in L/min
+    
+    def connect(self) -> bool:
+        """No-op for dummy device."""
+        return True
+    
+    def disconnect(self) -> None:
+        """No-op for dummy device."""
+        pass
+    
+    def step(self, dt: Optional[float] = None) -> None:
+        """No-op for dummy device."""
+        pass
+    
+    def get_flow(self) -> float:
+        """Return a constant flow value."""
+        with self._lock:
+            return float(self._flow)
+    
+    def is_connected(self) -> bool:
+        """Always returns True for dummy device."""
+        return True
+
+
+# -----------------------------------------------------------------------------
+# Device selection based on configuration
+# -----------------------------------------------------------------------------
+
+def _str_to_bool(s: Optional[str]) -> bool:
+    """Convert string to boolean."""
+    if s is None:
+        return False
+    return str(s).strip().lower() in ('1', 'true', 'yes', 'on')
+
+
+_use_i2c = _str_to_bool(get_str('USE_I2C_FLOWMETER', 'false'))
+_i2c_bus = get_int('FLOWMETER_I2C_BUS', 1)
+_i2c_address = int(get_str('FLOWMETER_I2C_ADDRESS', '0x40'), 0)  # Support hex
+_scale_factor = get_float('FLOWMETER_SCALE_FACTOR', 140.0)
+_offset = get_float('FLOWMETER_OFFSET', 32000.0)
+
+if _use_i2c:
+    try:
+        device = SFM3000FlowmeterDevice(
+            i2c_bus=_i2c_bus,
+            i2c_address=_i2c_address,
+            scale_factor=_scale_factor,
+            offset=_offset
+        )
+        if device.connect():
+            print(f"Flowmeter: SFM3000 on I2C bus {_i2c_bus}, address 0x{_i2c_address:02X}")
+        else:
+            print("Flowmeter: SFM3000 connection failed, falling back to dummy")
+            device = DummyFlowmeterDevice()
+            device.connect()
+    except Exception as e:
+        print(f"Flowmeter: SFM3000 init failed ({e}), using dummy")
+        device = DummyFlowmeterDevice()
+        device.connect()
+else:
+    device = DummyFlowmeterDevice()
+    device.connect()
+    print("Flowmeter: Using dummy device")

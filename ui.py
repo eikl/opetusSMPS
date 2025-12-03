@@ -119,6 +119,35 @@ class ControlUI:
         else:
             self.flow_current_var = tk.StringVar(value="Flow: n/a")
             ttk.Label(mainframe, textvariable=self.flow_current_var).grid(column=1, row=6, sticky=tk.W)
+        
+        # Aerosol flow display (from differential pressure meter SDP811)
+        try:
+            from hardware import diff_pressure_meter as _dpmhw
+            has_aerosol_flow = getattr(_dpmhw, 'device', None) is not None
+        except Exception as _dp_err:
+            has_aerosol_flow = False
+        
+        # Check if debug mode is enabled
+        _debug_mode = False
+        try:
+            _debug_str = get_str('DEBUG_MODE', '0')
+            _debug_mode = str(_debug_str).lower() in ('1', 'true', 'yes', 'on')
+        except Exception:
+            pass
+        
+        if has_aerosol_flow:
+            self.aerosol_flow_var = tk.StringVar(value="Aerosol Flow: --")
+            ttk.Label(mainframe, textvariable=self.aerosol_flow_var).grid(column=2, row=6, sticky=tk.W)
+            # Calibration button - only visible in debug mode
+            if _debug_mode:
+                self._calibrate_aerosol_btn = ttk.Button(
+                    mainframe, text="Calibrate @ 1 LPM", command=self._calibrate_aerosol_flow
+                )
+                self._calibrate_aerosol_btn.grid(column=3, row=6, sticky=tk.W)
+        else:
+            self.aerosol_flow_var = tk.StringVar(value="Aerosol Flow: n/a")
+            ttk.Label(mainframe, textvariable=self.aerosol_flow_var).grid(column=2, row=6, sticky=tk.W)
+        
         # determine idle sampling interval from cpc module if available
         try:
             import cpc_controller as _cpc_mod
@@ -267,6 +296,42 @@ class ControlUI:
         except Exception:
             pass
 
+    def _calibrate_aerosol_flow(self):
+        """Calibrate aerosol flow sensor assuming current flow is 1 L/min.
+        
+        The user should set the actual flow to exactly 1 L/min using an external
+        reference before clicking the calibration button.
+        """
+        try:
+            from hardware import diff_pressure_meter as dpm
+            
+            dp_dev = getattr(dpm, 'device', None)
+            if dp_dev is None:
+                messagebox.showerror("Calibration Error", "Differential pressure meter not available")
+                return
+            
+            # Calculate the calibration factor
+            try:
+                factor = dpm.calibrate_for_1lpm(dp_dev)
+            except ValueError as e:
+                messagebox.showerror("Calibration Error", str(e))
+                return
+            
+            # Apply the new calibration factor to the device
+            dp_dev.set_calibration_factor(factor)
+            
+            # Save to .env file
+            dpm.save_calibration_to_env(factor)
+            
+            messagebox.showinfo(
+                "Calibration Complete",
+                f"Calibration factor set to {factor:.6f}\n\n"
+                f"Saved to .env file.\n"
+                f"Aerosol flow should now read ~1.0 L/min."
+            )
+        except Exception as e:
+            messagebox.showerror("Calibration Error", f"Failed to calibrate: {e}")
+
     def _updater_loop(self):
         while not self._stop_event.is_set():
             try:
@@ -307,6 +372,8 @@ class ControlUI:
                     dev = getattr(_fmhw, 'device', None)
                     if dev is not None:
                         try:
+                            # Call step() to update the flow reading from the sensor
+                            dev.step()
                             fval = float(dev.get_flow())
                         except Exception:
                             fval = None
@@ -319,6 +386,28 @@ class ControlUI:
                             except Exception:
                                 pass
                         self.root.after(0, _set_flow_label)
+                except Exception:
+                    pass
+                # update aerosol flow label if differential pressure meter is present
+                try:
+                    from hardware import diff_pressure_meter as _dpmhw
+                    dp_dev = getattr(_dpmhw, 'device', None)
+                    if dp_dev is not None:
+                        try:
+                            # Call step() to update the reading from the sensor
+                            dp_dev.step()
+                            aerosol_flow = float(dp_dev.get_aerosol_flow())
+                        except Exception:
+                            aerosol_flow = None
+                        def _set_aerosol_flow_label(v=aerosol_flow):
+                            try:
+                                if v is None:
+                                    self.aerosol_flow_var.set("Aerosol Flow: err")
+                                else:
+                                    self.aerosol_flow_var.set(f"Aerosol Flow: {v:.3f}")
+                            except Exception:
+                                pass
+                        self.root.after(0, _set_aerosol_flow_label)
                 except Exception:
                     pass
                 # flow polling removed from updater (UI shows label only)

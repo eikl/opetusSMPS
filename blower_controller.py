@@ -8,7 +8,7 @@ Exports:
  - get_setpoint()
  - get_parameter()
 """
-from hardware.blower import device as blower_device
+from hardware.blowerdac import device as blowerdac_device
 from hardware.dummy_devices import DummyBlowerDevice
 from config import get_float, get_str
 from simple_pid import PID
@@ -19,12 +19,13 @@ import logging
 UPDATE_INTERVAL = float(get_float('BLOWER_UPDATE_INTERVAL', 0.05))
 
 # Check if we're using a dummy blower device
-_is_dummy_blower = isinstance(blower_device, DummyBlowerDevice)
+_is_dummy_blower = isinstance(blowerdac_device, DummyBlowerDevice)
 
 # PID and setpoint
 _blower_setpoint_lock = threading.Lock()
 _blower_setpoint = float(get_float('BLOWER_DEFAULT_SETPOINT', 4.0))
 _pid = PID(9, 7, 0.1, setpoint=_blower_setpoint)
+_pid.output_limits = (2,5)
 # whether to use the flowmeter reading as the PID process variable
 _use_flow_pv = False
 try:
@@ -62,7 +63,7 @@ def get_setpoint() -> float:
 
 
 def get_parameter() -> float:
-    return float(blower_device.get_parameter())
+    return float(blowerdac_device.get_parameter())
 
 def _control_loop():
     while True:
@@ -71,7 +72,7 @@ def _control_loop():
                 # Disable PID for dummy blower - use setpoint directly
                 with _blower_setpoint_lock:
                     voltage = _blower_setpoint
-                blower_device.set_voltage(voltage)
+                blowerdac_device.set_voltage(voltage)
             else:
                 # Real blower: use PID control
                 # choose process variable: flowmeter reading if enabled and available, else blower parameter
@@ -80,11 +81,11 @@ def _control_loop():
                         pv = float(_flow_device.get_flow())
                     except Exception:
                         logging.exception('Failed to read flowmeter for control PV; falling back to blower parameter')
-                        pv = float(blower_device.get_parameter())
+                        pv = float(blowerdac_device.get_parameter())
                 else:
-                    pv = float(blower_device.get_parameter())
+                    pv = float(blowerdac_device.get_parameter())
                 pid_out = _pid(pv)
-                blower_device.set_voltage(pid_out)
+                blowerdac_device.set_voltage(pid_out)
         except Exception:
             logging.exception('Blower control loop error')
         time.sleep(UPDATE_INTERVAL)

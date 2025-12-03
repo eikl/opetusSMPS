@@ -46,6 +46,7 @@ def get_int(key: str, default: int = 0) -> int:
     if v is None:
         return int(default)
     try:
-        return int(v)
+        # Support hex values like 0x25
+        return int(v, 0)
     except Exception:
         return int(default)
