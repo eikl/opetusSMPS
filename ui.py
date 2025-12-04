@@ -69,7 +69,7 @@ class ControlUI:
             orient=tk.HORIZONTAL,
             length=300,
             from_=0.0,
-            to=10.0,
+            to=200.0,
             variable=self.blower_set_var,
             command=self._blower_scale_moved,
         )

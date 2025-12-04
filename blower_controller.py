@@ -24,8 +24,8 @@ _is_dummy_blower = isinstance(blowerdac_device, DummyBlowerDevice)
 # PID and setpoint
 _blower_setpoint_lock = threading.Lock()
 _blower_setpoint = float(get_float('BLOWER_DEFAULT_SETPOINT', 4.0))
-_pid = PID(9, 7, 0.1, setpoint=_blower_setpoint)
-_pid.output_limits = (2,5)
+_pid = PID(0.005, 0.03, 0, setpoint=_blower_setpoint)
+_pid.output_limits = (0,5)
 # whether to use the flowmeter reading as the PID process variable
 _use_flow_pv = False
 try:
@@ -85,6 +85,7 @@ def _control_loop():
                 else:
                     pv = float(blowerdac_device.get_parameter())
                 pid_out = _pid(pv)
+                print('dac voltage set to:', pid_out)
                 blowerdac_device.set_voltage(pid_out)
         except Exception:
             logging.exception('Blower control loop error')
