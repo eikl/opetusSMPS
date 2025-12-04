@@ -82,6 +82,10 @@ class ControlUI:
         self.blower_current_var = tk.StringVar(value=f"Current: {self.blower.get_parameter():.2f}")
         ttk.Label(mainframe, textvariable=self.blower_current_var).grid(column=0, row=5, sticky=tk.W)
         print(self.blower.get_parameter())
+        
+        # PID auto-tune button (debug mode only, added later after debug_mode check)
+        self._autotune_btn = None
+        
         # CPC concentration display
         try:
             from cpc_controller import get_concentration
@@ -147,6 +151,17 @@ class ControlUI:
         else:
             self.aerosol_flow_var = tk.StringVar(value="Aerosol Flow: n/a")
             ttk.Label(mainframe, textvariable=self.aerosol_flow_var).grid(column=2, row=6, sticky=tk.W)
+        
+        # PID auto-tune button - only visible in debug mode
+        if _debug_mode:
+            self._autotune_btn = ttk.Button(
+                mainframe, text="Auto-Tune PID", command=self._start_pid_autotune
+            )
+            self._autotune_btn.grid(column=3, row=5, sticky=tk.W)
+            # PID params display
+            self._pid_params_var = tk.StringVar(value="PID: --")
+            ttk.Label(mainframe, textvariable=self._pid_params_var).grid(column=1, row=5, sticky=tk.W)
+            self._update_pid_params_display()
         
         # determine idle sampling interval from cpc module if available
         try:
@@ -331,6 +346,107 @@ class ControlUI:
             )
         except Exception as e:
             messagebox.showerror("Calibration Error", f"Failed to calibrate: {e}")
+
+    def _update_pid_params_display(self):
+        """Update the PID parameters display label."""
+        try:
+            import blower_controller
+            params = blower_controller.get_pid_params()
+            self._pid_params_var.set(
+                f"PID: P={params['Kp']:.4f} I={params['Ki']:.4f} D={params['Kd']:.4f}"
+            )
+        except Exception:
+            pass
+
+    def _start_pid_autotune(self):
+        """Start automatic PID tuning in a background thread."""
+        import blower_controller
+        
+        # Check if already tuning
+        if blower_controller.is_tuning():
+            messagebox.showwarning("Auto-Tune", "Auto-tuning is already in progress")
+            return
+        
+        # Confirm with user
+        current_setpoint = self.blower.get_setpoint()
+        if not messagebox.askyesno(
+            "Auto-Tune PID",
+            f"This will temporarily take over blower control to tune the PID.\n\n"
+            f"Current setpoint: {current_setpoint:.2f}\n\n"
+            f"The process will induce oscillations around the setpoint.\n"
+            f"This may take up to 2 minutes.\n\n"
+            f"Continue?"
+        ):
+            return
+        
+        # Disable button during tuning
+        if self._autotune_btn:
+            self._autotune_btn.config(state='disabled')
+        
+        # Create progress window
+        progress_win = tk.Toplevel(self.root)
+        progress_win.title("PID Auto-Tune")
+        progress_win.geometry("400x150")
+        progress_win.transient(self.root)
+        
+        ttk.Label(progress_win, text="Step response tuning...").pack(pady=10)
+        progress_var = tk.DoubleVar(value=0)
+        progress_bar = ttk.Progressbar(progress_win, variable=progress_var, maximum=1.0, length=350)
+        progress_bar.pack(pady=10)
+        status_var = tk.StringVar(value="Starting...")
+        ttk.Label(progress_win, textvariable=status_var).pack(pady=5)
+        
+        def update_progress(progress, message):
+            """Callback to update progress from tuning thread."""
+            def _update():
+                progress_var.set(progress)
+                status_var.set(message)
+            self.root.after(0, _update)
+        
+        def tuning_thread():
+            try:
+                result = blower_controller.auto_tune_pid(
+                    apply_result=True,
+                    callback=update_progress
+                )
+                
+                def show_result():
+                    progress_win.destroy()
+                    if self._autotune_btn:
+                        self._autotune_btn.config(state='normal')
+                    self._update_pid_params_display()
+                    
+                    if result.get('success'):
+                        messagebox.showinfo(
+                            "Auto-Tune Complete",
+                            f"PID parameters updated:\n\n"
+                            f"Kp = {result['Kp']:.6f}\n"
+                            f"Ki = {result['Ki']:.6f}\n"
+                            f"Kd = {result['Kd']:.6f}\n\n"
+                            f"Process gain (K) = {result.get('K', 0):.4f} flow/V\n"
+                            f"Time constant (τ) = {result.get('tau', 0):.2f}s\n"
+                            f"Dead time (θ) = {result.get('theta', 0):.2f}s"
+                        )
+                    else:
+                        messagebox.showerror(
+                            "Auto-Tune Failed",
+                            "Could not determine PID parameters.\n"
+                            "Make sure the blower responds to voltage changes."
+                        )
+                
+                self.root.after(0, show_result)
+                
+            except Exception as e:
+                def show_error():
+                    progress_win.destroy()
+                    if self._autotune_btn:
+                        self._autotune_btn.config(state='normal')
+                    messagebox.showerror("Auto-Tune Error", str(e))
+                
+                self.root.after(0, show_error)
+        
+        # Start tuning in background thread
+        threading.Thread(target=tuning_thread, daemon=True).start()
 
     def _updater_loop(self):
         while not self._stop_event.is_set():
