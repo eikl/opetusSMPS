@@ -38,8 +38,16 @@ class SerialCPCDevice:
                 return
             try:
                 import serial  # type: ignore
-                self._serial = serial.Serial(self.port, self.baud, timeout=0.5)
+                self._serial = serial.Serial(
+                    self.port,
+                    self.baud,
+                    timeout=0.5,
+                    parity=serial.PARITY_EVEN,
+                    bytesize=serial.SEVENBITS,
+                    stopbits=serial.STOPBITS_ONE,
+                )
                 self._connected = True
+                print(f"SerialCPCDevice: connected to {self.port} at {self.baud} baud")
             except Exception:
                 self._connected = False
                 raise
@@ -60,7 +68,7 @@ class SerialCPCDevice:
         Replace with device-specific command if needed.
         Example placeholder: b'READ?\n'
         """
-        return b"READ?\n"
+        return b"RD\r"
 
     def _parse_conc_response(self, data: bytes) -> Optional[float]:
         """Parse a response from the device and return concentration as float.
@@ -68,12 +76,12 @@ class SerialCPCDevice:
         Replace with device-specific parsing. Example expects b'C:12.34\n'.
         """
         try:
-            s = data.decode("ascii").strip()
-            if s.startswith("C:"):
-                return float(s[2:])
-        except Exception:
-            pass
-        return None
+            s = data.decode('ascii').strip()
+            #print('decoded')
+            #print(s)
+        except Exception as e:
+            print('decode error', e)
+        return float(s)
 
     def get_concentration(self) -> float:
         with self._lock:

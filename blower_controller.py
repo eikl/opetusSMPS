@@ -94,7 +94,7 @@ def _control_loop():
                 else:
                     pv = float(blowerdac_device.get_parameter())
                 pid_out = _pid(pv)
-                print('dac voltage set to:', pid_out)
+                #print('dac voltage set to:', pid_out)
                 blowerdac_device.set_voltage(pid_out)
         except Exception:
             logging.exception('Blower control loop error')
