@@ -641,15 +641,14 @@ class ControlUI:
                     import datetime as _dt
                     sp = (self.save_path_var.get() or "").strip()
                     if sp:
-                        # Generate a timestamped filename so no two runs collide
-                        ts = _dt.datetime.now().strftime('%Y%m%d_%H%M%S_%f')[:-3]  # ms precision
+                        # Use DMYYMMDD naming to match inversion code's get_dmps_filenames()
+                        dm_name = _dt.datetime.now().strftime('DM%y%m%d')
                         if sp.endswith('/') or sp.endswith(os.sep):
                             # Treat as directory prefix
-                            save_path = os.path.join(sp, f'measurement_{ts}.csv')
+                            save_path = os.path.join(sp, f'{dm_name}.csv')
                         else:
-                            # Treat as file path: inject timestamp before extension
-                            base, ext = os.path.splitext(sp)
-                            save_path = f'{base}_{ts}{ext or ".csv"}'
+                            # Treat as file path: use the user-supplied name as-is
+                            save_path = sp
                         # Update the UI entry so user can see the actual filename
                         def _show_path(p=save_path):
                             self.save_path_var.set(p)
