@@ -19,6 +19,43 @@ import threading
 import time
 import logging
 import math
+import configparser
+import os
+
+_PID_CONFIG_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'pid_config.ini')
+
+
+def _save_pid_to_file(kp: float, ki: float, kd: float):
+    """Write PID parameters to pid_config.ini."""
+    cfg = configparser.ConfigParser()
+    cfg['pid'] = {'kp': str(kp), 'ki': str(ki), 'kd': str(kd)}
+    try:
+        with open(_PID_CONFIG_FILE, 'w') as f:
+            cfg.write(f)
+        logging.info(f"PID parameters saved to {_PID_CONFIG_FILE}: Kp={kp}, Ki={ki}, Kd={kd}")
+    except Exception:
+        logging.exception('Failed to save PID parameters')
+
+
+def _load_pid_from_file():
+    """Load PID parameters from pid_config.ini if it exists.
+
+    Returns dict with 'Kp','Ki','Kd' or None.
+    """
+    if not os.path.isfile(_PID_CONFIG_FILE):
+        return None
+    try:
+        cfg = configparser.ConfigParser()
+        cfg.read(_PID_CONFIG_FILE)
+        kp = float(cfg.get('pid', 'kp'))
+        ki = float(cfg.get('pid', 'ki'))
+        kd = float(cfg.get('pid', 'kd'))
+        logging.info(f"PID parameters loaded from {_PID_CONFIG_FILE}: Kp={kp}, Ki={ki}, Kd={kd}")
+        return {'Kp': kp, 'Ki': ki, 'Kd': kd}
+    except Exception:
+        logging.exception('Failed to load PID parameters')
+        return None
+
 
 UPDATE_INTERVAL = float(get_float('BLOWER_UPDATE_INTERVAL', 0.05))
 
@@ -30,6 +67,14 @@ _blower_setpoint_lock = threading.Lock()
 _blower_setpoint = float(get_float('BLOWER_DEFAULT_SETPOINT', 4.0))
 _pid = PID(0.005, 0.03, 0, setpoint=_blower_setpoint)
 _pid.output_limits = (0,5)
+
+# Load saved PID params from config file if available
+_saved_pid = _load_pid_from_file()
+if _saved_pid:
+    _pid.Kp = _saved_pid['Kp']
+    _pid.Ki = _saved_pid['Ki']
+    _pid.Kd = _saved_pid['Kd']
+    logging.info(f"Restored PID from config: Kp={_pid.Kp}, Ki={_pid.Ki}, Kd={_pid.Kd}")
 # whether to use the flowmeter reading as the PID process variable
 _use_flow_pv = False
 try:
@@ -126,8 +171,24 @@ def get_pid_params() -> dict:
     }
 
 
+def save_pid_params(kp: float = None, ki: float = None, kd: float = None):
+    """Save PID parameters to pid_config.ini.
+
+    If arguments are None, saves the current PID values.
+    """
+    kp = kp if kp is not None else _pid.Kp
+    ki = ki if ki is not None else _pid.Ki
+    kd = kd if kd is not None else _pid.Kd
+    _save_pid_to_file(kp, ki, kd)
+
+
+def load_pid_params() -> dict:
+    """Load PID parameters from pid_config.ini if it exists."""
+    return _load_pid_from_file()
+
+
 def set_pid_params(kp: float, ki: float, kd: float):
-    """Set PID parameters manually.
+    """Set PID parameters manually and save to config file.
     
     Args:
         kp: Proportional gain
@@ -139,6 +200,7 @@ def set_pid_params(kp: float, ki: float, kd: float):
     _pid.Kd = kd
     _pid.reset()
     logging.info(f"PID parameters set to Kp={kp}, Ki={ki}, Kd={kd}")
+    save_pid_params(kp, ki, kd)
 
 
 def is_tuning() -> bool:
@@ -285,21 +347,24 @@ class StepResponseTuner:
         
         logging.info(f"StepTune: theta={theta:.2f}s, tau={tau:.2f}s")
         
-        # Lambda tuning (very robust, good for flow control)
-        # Choose lambda (closed-loop time constant) = tau for moderate response
-        lambda_cl = tau
+        # Lambda tuning (conservative for flow control)
+        # lambda_cl >= 3*tau gives smooth, non-oscillatory response
+        lambda_cl = max(3.0 * tau, 1.0)
         
         # PI controller: Kp = tau / (K * (lambda + theta))
-        #                Ki = Kp / tau
+        #                Ki = Kp / (tau + theta) — integral tied to total lag
         Kp = tau / (K * (lambda_cl + theta)) if K != 0 else 0
-        Ki = Kp / tau if tau > 0 else 0
+        # Use integral time = tau (not tau alone for Ki = Kp/tau which is
+        # too aggressive when tau is small)
+        Ti = tau + theta if (tau + theta) > 0 else 1.0
+        Ki = Kp / Ti
         Kd = 0  # No derivative for flow control
         
         # Sanity check - make sure gains are reasonable
         if abs(Kp) > 10:
             logging.warning(f"StepTune: Kp={Kp:.4f} seems too high, capping")
             Kp = 10 * (1 if Kp > 0 else -1)
-            Ki = Kp / tau if tau > 0 else 0
+            Ki = Kp / Ti
         
         logging.info(f"StepTune result: Kp={Kp:.6f}, Ki={Ki:.6f}, Kd={Kd:.6f}")
         
@@ -323,8 +388,20 @@ class StepResponseTuner:
         logging.info(f"StepTune finished: {message}")
 
 
+def _activate_flow_pv(flow_dev):
+    """Switch the PID control loop to use a flow device as process variable.
+
+    Called automatically after a successful auto-tune so that the tuned gains
+    (which are based on flow dynamics) are actually used with flow feedback.
+    """
+    global _use_flow_pv, _flow_device
+    _flow_device = flow_dev
+    _use_flow_pv = True
+    logging.info('PID control loop switched to flow feedback after auto-tune')
+
+
 def auto_tune_pid(setpoint: float = None, apply_result: bool = True,
-                  output_low: float = 2.5, output_high: float = 3.5,
+                  output_low: float = None, output_high: float = None,
                   settle_time: float = 20.0, max_time: float = 90.0, 
                   callback=None) -> dict:
     """Run automatic PID tuning using step response method.
@@ -360,9 +437,55 @@ def auto_tune_pid(setpoint: float = None, apply_result: bool = True,
         if _is_dummy_blower:
             raise RuntimeError("Cannot auto-tune with dummy blower device")
         
-        if not _use_flow_pv or _flow_device is None:
-            raise RuntimeError("Flowmeter not available for auto-tuning. "
-                             "Enable BLOWER_USE_FLOW_PV in .env")
+        # Find a flow feedback device for tuning — try module-level flowmeter
+        # first, then attempt to import one dynamically if BLOWER_USE_FLOW_PV
+        # was not enabled in .env.
+        tune_flow_device = _flow_device
+        if tune_flow_device is None:
+            # Try to grab the flowmeter device directly
+            try:
+                from hardware import flowmeter as _fmhw_tune
+                tune_flow_device = getattr(_fmhw_tune, 'device', None)
+            except Exception:
+                pass
+        if tune_flow_device is None:
+            # Try differential pressure meter as last resort
+            try:
+                from hardware import diff_pressure_meter as _dpm_tune
+                _dp_dev = getattr(_dpm_tune, 'device', None)
+                if _dp_dev is not None:
+                    # Wrap in a compatible interface (step/get_flow)
+                    class _DPFlowAdapter:
+                        def __init__(self, dev):
+                            self._dev = dev
+                        def step(self):
+                            self._dev.step()
+                        def get_flow(self):
+                            return self._dev.get_aerosol_flow()
+                    tune_flow_device = _DPFlowAdapter(_dp_dev)
+            except Exception:
+                pass
+        if tune_flow_device is None:
+            raise RuntimeError(
+                "No flow feedback device available for auto-tuning. "
+                "Connect a flowmeter (USE_I2C_FLOWMETER) or differential "
+                "pressure meter (USE_I2C_PRESSURE) in .env"
+            )
+        
+        # Determine step voltages around current operating point if not given
+        if output_low is None or output_high is None:
+            current_output = float(blowerdac_device.get_parameter())
+            # Default: step ±0.5 V around the current DAC voltage,
+            # clamped to the PID output limits (0–5 V).
+            lo_limit, hi_limit = (_pid.output_limits[0] or 0.0,
+                                  _pid.output_limits[1] or 5.0)
+            if output_low is None:
+                output_low = max(lo_limit, current_output - 0.5)
+            if output_high is None:
+                output_high = min(hi_limit, current_output + 0.5)
+            # guarantee a meaningful step size
+            if abs(output_high - output_low) < 0.2:
+                output_high = min(hi_limit, output_low + 0.5)
         
         if callback:
             callback(0, f"Starting step response test: {output_low:.2f}V -> {output_high:.2f}V")
@@ -385,10 +508,10 @@ def auto_tune_pid(setpoint: float = None, apply_result: bool = True,
             
             # Read process variable
             try:
-                _flow_device.step()
-                pv = float(_flow_device.get_flow())
+                tune_flow_device.step()
+                pv = float(tune_flow_device.get_flow())
             except Exception as e:
-                logging.exception("Failed to read flowmeter during auto-tune")
+                logging.exception("Failed to read flow device during auto-tune")
                 raise RuntimeError(f"Flowmeter read failed: {e}")
             
             # Update tuner and get output
@@ -411,6 +534,9 @@ def auto_tune_pid(setpoint: float = None, apply_result: bool = True,
         
         if result['success'] and apply_result:
             set_pid_params(result['Kp'], result['Ki'], result['Kd'])
+            # Enable flow feedback so the PID loop uses the flowmeter
+            # (tuned gains are based on flow dynamics, not raw voltage)
+            _activate_flow_pv(tune_flow_device)
             if callback:
                 callback(1.0, f"Applied: Kp={result['Kp']:.4f}, Ki={result['Ki']:.4f}, Kd={result['Kd']:.4f}")
         elif callback:

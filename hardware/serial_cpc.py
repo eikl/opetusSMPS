@@ -92,9 +92,11 @@ class SerialCPCDevice:
             if not self._connected:
                 raise RuntimeError("SerialCPCDevice: not connected")
             try:
+                # flush any stale data before sending query
+                self._serial.reset_input_buffer()  # type: ignore
                 # send a query and parse response
                 self._serial.write(self._format_query())  # type: ignore
-                data = self._serial.read(128)  # type: ignore
+                data = self._serial.readline()  # type: ignore
                 v = self._parse_conc_response(data)
                 if v is not None:
                     self._conc = v
