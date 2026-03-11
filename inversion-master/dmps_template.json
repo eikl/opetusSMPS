@@ -1,0 +1,40 @@
+{
+    "default_temperature":293,
+    "default_pressure":0.950e5,
+    "force_defaults":false,
+    "amount_of_dmas":1,
+    "high_voltage_polarity":1,
+    "pipe_length":0.5,
+    "pipe_flow":5,
+    "pipe_inner_diameter":4E-3,
+    "final_grid_method":2,
+    "max_charge":6,
+    "dmas":[
+    {
+        "length":0.109,
+        "outer_radius":3.3e-2,
+        "inner_radius":2.5e-2,
+        "sheath_flow":20,
+        "excess_flow":20,
+        "aerosol_flow_in":4,
+        "aerosol_flow_out":4,
+        "loss_factor":1.00,
+        "fitted_length":5.5,
+        "voltage_channels":16,
+        "index_start":0,
+        "index_end":-1,
+        "invert": true
+    }
+    ],
+    "cpcs":[
+        {
+            "type":"TSI3025"
+        },
+        {
+            "type":"TSI3010",
+            "options":{
+                "set_temperature":21
+            }
+        }
+    ]
+}

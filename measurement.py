@@ -200,8 +200,11 @@ class MeasurementRunner:
         # open raw file if saving
         raw_file = None
         raw_writer = None
+        dat_file = None
+        flw_file = None
         dat_scans: List[dict] = []  # collect per-scan data for .DAT output
         dma_params = _read_dma_params() if save_path else None
+        midnight = None
         if save_path:
             import os
             save_path_expanded = os.path.expanduser(save_path)
@@ -213,6 +216,12 @@ class MeasurementRunner:
             raw_file = open(raw_path, 'w', newline='')
             raw_writer = csv.writer(raw_file)
             raw_writer.writerow(['repetition', 'voltage', 'timestamp_utc', 'concentration'])
+            # open .DAT and .FLW for incremental writing
+            if dma_params:
+                dat_file = open(base + '.DAT', 'w')
+                flw_file = open(base + '.FLW', 'w')
+                midnight = datetime.now().replace(
+                    hour=0, minute=0, second=0, microsecond=0)
 
         all_results: List[List[tuple]] = []
         seq_start = time.time()
@@ -305,18 +314,41 @@ class MeasurementRunner:
                 avg = sum(valid) / len(valid) if valid else float('nan')
                 scan_results.append((v, avg))
 
-            # record scan for .DAT / .FLW output
-            if save_path and dma_params:
+            # record scan for .DAT / .FLW output — write immediately
+            if dat_file and dma_params:
                 scan_end = datetime.now()
                 sensor = _try_read_sensors()
                 counting_time = len(voltages) * (settling + measure_time)
-                dat_scans.append({
+                scan_record = {
                     'start': scan_start,
                     'end': scan_end,
                     'sensor': sensor,
                     'counting_time': counting_time,
                     'data': list(scan_results),
-                })
+                }
+                dat_scans.append(scan_record)
+                try:
+                    # append to .DAT
+                    t0 = scan_start.strftime("'%m-%d-%Y %H:%M:%S'")
+                    t1 = scan_end.strftime("'%m-%d-%Y %H:%M:%S'")
+                    dat_file.write(f"{t0} {t1}\n")
+                    dat_file.write(_format_dat_parameter_line(
+                        dma_params, sensor, counting_time) + "\n")
+                    for voltage, concentration in scan_results:
+                        if voltage == 0:
+                            continue
+                        dat_file.write(f"{voltage}\t{concentration}\n")
+                    dat_file.flush()
+                except Exception:
+                    pass
+                try:
+                    # append to .FLW
+                    delta = (scan_start - midnight).total_seconds() / 3600.0
+                    flw_file.write(_format_flw_line(
+                        delta, dma_params, sensor) + "\n")
+                    flw_file.flush()
+                except Exception:
+                    pass
 
             all_results.append(scan_results)
             rep_index += 1
@@ -347,44 +379,13 @@ class MeasurementRunner:
             except Exception:
                 pass
 
-        # ---- write .DAT file (inversion-compatible) ----
-        if save_path and dat_scans and dma_params:
-            try:
-                save_path_expanded = os.path.expanduser(save_path)
-                base_name, _ = os.path.splitext(save_path_expanded)
-                dat_path = base_name + '.DAT'
-                with open(dat_path, 'w') as df:
-                    for scan in dat_scans:
-                        # interval line: 'MM-DD-YYYY HH:MM:SS' 'MM-DD-YYYY HH:MM:SS'
-                        t0 = scan['start'].strftime("'%m-%d-%Y %H:%M:%S'")
-                        t1 = scan['end'].strftime("'%m-%d-%Y %H:%M:%S'")
-                        df.write(f"{t0} {t1}\n")
-                        # parameter line (15 tab-separated columns)
-                        df.write(_format_dat_parameter_line(
-                            dma_params, scan['sensor'],
-                            scan['counting_time']) + "\n")
-                        # scan data: voltage <tab> concentration
-                        for voltage, concentration in scan['data']:
-                            df.write(f"{voltage}\t{concentration}\n")
-            except Exception:
-                pass
-
-        # ---- write .FLW file (flow / environment log) ----
-        if save_path and dat_scans and dma_params:
-            try:
-                save_path_expanded = os.path.expanduser(save_path)
-                base_name, _ = os.path.splitext(save_path_expanded)
-                flw_path = base_name + '.FLW'
-                # midnight of the first scan's day
-                midnight = dat_scans[0]['start'].replace(
-                    hour=0, minute=0, second=0, microsecond=0)
-                with open(flw_path, 'w') as ff:
-                    for scan in dat_scans:
-                        delta = (scan['start'] - midnight).total_seconds() / 3600.0
-                        ff.write(_format_flw_line(
-                            delta, dma_params, scan['sensor']) + "\n")
-            except Exception:
-                pass
+        # close .DAT and .FLW files
+        for fh in (dat_file, flw_file):
+            if fh:
+                try:
+                    fh.close()
+                except Exception:
+                    pass
 
         # final progress
         if progress_callback:
