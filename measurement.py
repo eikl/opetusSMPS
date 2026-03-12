@@ -185,6 +185,21 @@ class MeasurementRunner:
         rep_index = 0
         seq_start = time.time()
 
+        # Cached status reader — queries serial at most every 5 seconds
+        _cached_status = [None]
+        _cached_status_time = [0.0]
+        _STATUS_POLL_INTERVAL = 5.0
+
+        def _get_cached_status():
+            now = time.time()
+            if now - _cached_status_time[0] >= _STATUS_POLL_INTERVAL:
+                try:
+                    _cached_status[0] = _get_status()
+                except Exception:
+                    pass
+                _cached_status_time[0] = now
+            return _cached_status[0]
+
         try:
             while True:
                 rep_index += 1
@@ -203,9 +218,8 @@ class MeasurementRunner:
                         pass
 
                 results = []
-                total_duration = sum((settling + measure_time) for _ in voltages)
-
                 scan_start_delay = float(get_float('SCAN_START_DELAY', 10.0))
+                total_duration = scan_start_delay + sum((settling + measure_time) for _ in voltages)
 
                 for vi, v in enumerate(voltages):
                     if stop_event is not None and stop_event.is_set():
@@ -227,7 +241,7 @@ class MeasurementRunner:
                                     sample_callback(v, time.time() - seq_start, c)
                                 except Exception:
                                     pass
-                            time.sleep(0.2)
+                            time.sleep(self.sample_interval)
 
                     # settling phase
                     t_set_start = time.time()
@@ -246,7 +260,7 @@ class MeasurementRunner:
                         if raw_writer:
                             try:
                                 ts = __import__('datetime').datetime.utcfromtimestamp(time.time()).isoformat() + 'Z'
-                                st = _get_status()
+                                st = _get_cached_status()
                                 sb = f"0x{st['value']:02X}" if isinstance(st, dict) and 'value' in st else ''
                                 raw_writer.writerow([v, ts, f"{c}", sb])
                                 raw_file.flush()
@@ -274,7 +288,7 @@ class MeasurementRunner:
                         if raw_writer:
                             try:
                                 ts = __import__('datetime').datetime.utcfromtimestamp(time.time()).isoformat() + 'Z'
-                                st = _get_status()
+                                st = _get_cached_status()
                                 sb = f"0x{st['value']:02X}" if isinstance(st, dict) and 'value' in st else ''
                                 raw_writer.writerow([v, ts, f"{c}", sb])
                                 raw_file.flush()

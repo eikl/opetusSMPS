@@ -184,7 +184,7 @@ def calibrate_for_1lpm(dev) -> float:
         raise ValueError("Pressure reading is too small for calibration (near zero)")
     
     # calibration_factor = target_flow / pressure = 1.0 / pressure
-    factor = 1.0 / abs(pressure)
+    factor = 1.0 / pressure
     return factor
 
 

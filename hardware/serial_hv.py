@@ -66,28 +66,30 @@ class SerialHVDevice:
         """Open serial port, send *cmd*, read response, close port.
 
         Returns the raw response bytes (from ``readline``).
+        Thread-safe: serialised via ``_lock``.
         """
         import serial  # type: ignore
-        ser = None
-        try:
-            ser = serial.Serial(self.port, self.baud, timeout=1, write_timeout=1)
-            cmd_e = cmd.encode()
-            ser.write(cmd_e)
-            print('write')
-            print(cmd_e)
-            ser.flush()
-            res = ser.readline()
-            print('response')
-            print(res)
-            ser.flush()
-            return res
-        finally:
-            if ser is not None:
-                time.sleep(0.1)
-                try:
-                    ser.close()
-                except Exception as e:
-                    print(f"Error closing serial port: {e}")
+        with self._lock:
+            ser = None
+            try:
+                ser = serial.Serial(self.port, self.baud, timeout=1, write_timeout=1)
+                cmd_e = cmd.encode()
+                ser.write(cmd_e)
+                print('write')
+                print(cmd_e)
+                ser.flush()
+                res = ser.readline()
+                print('response')
+                print(res)
+                ser.flush()
+                return res
+            finally:
+                if ser is not None:
+                    time.sleep(0.1)
+                    try:
+                        ser.close()
+                    except Exception as e:
+                        print(f"Error closing serial port: {e}")
 
     def chk_sum(self, a):
         sum_c=0
@@ -206,17 +208,16 @@ class SerialHVDevice:
 
     def set_voltage(self, voltage: float) -> None:
         """Set the HV output voltage."""
-        with self._lock:
-            v = int(voltage)
-            try:
-                cmd = self._format_set_command(v)
-                self.write_cmd(cmd)
-                self._voltage = v
-            except Exception as e:
-                print(f"Error in HV command: {e}")
-                import traceback
-                traceback.print_exc()
-                raise
+        v = int(voltage)
+        try:
+            cmd = self._format_set_command(v)
+            self.write_cmd(cmd)
+            self._voltage = v
+        except Exception as e:
+            print(f"Error in HV command: {e}")
+            import traceback
+            traceback.print_exc()
+            raise
 
 
 

@@ -150,7 +150,7 @@ class ControlUI:
         
         if has_aerosol_flow:
             self.aerosol_flow_var = tk.StringVar(value="Aerosol Flow: --")
-            ttk.Label(mainframe, textvariable=self.aerosol_flow_var).grid(column=2, row=6, sticky=tk.W)
+            ttk.Label(mainframe, textvariable=self.aerosol_flow_var, width=25).grid(column=2, row=6, sticky=tk.W)
             # Calibration button - only visible in debug mode
             if _debug_mode:
                 self._calibrate_aerosol_btn = ttk.Button(
@@ -159,7 +159,7 @@ class ControlUI:
                 self._calibrate_aerosol_btn.grid(column=3, row=6, sticky=tk.W)
         else:
             self.aerosol_flow_var = tk.StringVar(value="Aerosol Flow: n/a")
-            ttk.Label(mainframe, textvariable=self.aerosol_flow_var).grid(column=2, row=6, sticky=tk.W)
+            ttk.Label(mainframe, textvariable=self.aerosol_flow_var, width=25).grid(column=2, row=6, sticky=tk.W)
         
         # PID auto-tune button - only visible in debug mode
         if _debug_mode:
@@ -260,6 +260,7 @@ class ControlUI:
             self.ax2.set_title('Measurement result')
             self.ax2.set_xlabel('voltage (V)')
             self.ax2.set_ylabel('average concentration')
+            self.ax2.set_xscale('log')
             self._result_line, = self.ax2.plot([], [], 's-')
             self._result_canvas = FigureCanvasTkAgg(self.fig2, master=mainframe)
             self._result_canvas.get_tk_widget().grid(column=0, row=17, columnspan=3)
@@ -646,15 +647,25 @@ class ControlUI:
                 if vmin == vmax:
                     voltages = [float(vmin)]
                 else:
+                    import math
                     # interpret steps_between as the number of points between min and max
                     # total points = steps_between + 2 (including endpoints)
                     total_points = max(2, steps_between + 2)
-                    # ensure ascending order for linspace
+                    # ensure ascending order for logspace
                     low, high = (vmin, vmax) if vmin < vmax else (vmax, vmin)
-                    span = float(high) - float(low)
-                    for i in range(total_points):
-                        frac = i / (total_points - 1)
-                        voltages.append(low + frac * span)
+                    if low <= 0:
+                        # logarithmic spacing requires positive values;
+                        # fall back to linear if min <= 0
+                        span = float(high) - float(low)
+                        for i in range(total_points):
+                            frac = i / (total_points - 1)
+                            voltages.append(low + frac * span)
+                    else:
+                        log_low = math.log10(low)
+                        log_high = math.log10(high)
+                        for i in range(total_points):
+                            frac = i / (total_points - 1)
+                            voltages.append(10 ** (log_low + frac * (log_high - log_low)))
                     # if original order was descending, reverse to preserve user intent
                     if vmin > vmax:
                         voltages = list(reversed(voltages))
