@@ -153,14 +153,9 @@ class SerialHVDevice:
             idx = text.find('SR=')
             if idx < 0:
                 return None
-            # Extract all hex chars after SR=
-            hex_str = ''
-            for ch in text[idx + 3:]:
-                if ch in '0123456789abcdefABCDEF':
-                    hex_str += ch
-                else:
-                    break
-            if not hex_str:
+            # Extract first 4 hex chars after SR=
+            hex_str = text[idx + 3: idx + 3 + 4]
+            if len(hex_str) < 4:
                 return None
             full_val = int(hex_str, 16)
             # Use only the least significant byte as the status byte

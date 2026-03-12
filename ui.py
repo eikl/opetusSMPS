@@ -214,21 +214,27 @@ class ControlUI:
         self.measure_time_var = tk.DoubleVar(value=5.0)
         ttk.Entry(mainframe, textvariable=self.measure_time_var, width=10).grid(column=1, row=12, sticky=tk.W)
 
+        ttk.Label(mainframe, text="Scan repetitions (-1 = ∞)").grid(column=0, row=13, sticky=tk.W)
+        self.repetitions_var = tk.IntVar(value=1)
+        ttk.Entry(mainframe, textvariable=self.repetitions_var, width=10).grid(column=1, row=13, sticky=tk.W)
+
         self.save_var = tk.BooleanVar(value=False)
-        ttk.Checkbutton(mainframe, text="Save to CSV", variable=self.save_var).grid(column=0, row=13, sticky=tk.W)
+        ttk.Checkbutton(mainframe, text="Save to CSV", variable=self.save_var).grid(column=0, row=14, sticky=tk.W)
         self.save_path_var = tk.StringVar(value="measurements.csv")
-        ttk.Entry(mainframe, textvariable=self.save_path_var, width=30).grid(column=1, row=13, columnspan=2, sticky=(tk.W, tk.E))
+        ttk.Entry(mainframe, textvariable=self.save_path_var, width=30).grid(column=1, row=14, columnspan=2, sticky=(tk.W, tk.E))
 
         self.measure_status_var = tk.StringVar(value="Idle")
-        ttk.Label(mainframe, textvariable=self.measure_status_var).grid(column=0, row=14, sticky=tk.W)
+        ttk.Label(mainframe, textvariable=self.measure_status_var).grid(column=0, row=15, sticky=tk.W)
         # Load config button
         self._loaded_config_var = tk.StringVar(value="")
         self._load_button = ttk.Button(mainframe, text="Load .ini", command=self._load_ini_config)
-        self._load_button.grid(column=1, row=14, sticky=tk.W)
-        ttk.Label(mainframe, textvariable=self._loaded_config_var).grid(column=0, row=15, columnspan=2, sticky=(tk.W, tk.E))
+        self._load_button.grid(column=1, row=15, sticky=tk.W)
+        ttk.Label(mainframe, textvariable=self._loaded_config_var).grid(column=0, row=16, columnspan=2, sticky=(tk.W, tk.E))
 
         self._start_button = ttk.Button(mainframe, text="Start Measurement", command=self._start_measurement)
-        self._start_button.grid(column=2, row=14)
+        self._start_button.grid(column=2, row=15)
+        self._stop_meas_button = ttk.Button(mainframe, text="Stop", command=self._stop_measurement, state=tk.DISABLED)
+        self._stop_meas_button.grid(column=3, row=15)
 
         # Timeseries plot area for CPC
         if _HAS_MATPLOTLIB:
@@ -271,6 +277,7 @@ class ControlUI:
 
         # start background thread to update current values
         self._stop_event = threading.Event()
+        self._measure_stop_event = threading.Event()
         # flag that indicates a measurement run is active
         self._measure_running = False
         # last time an idle sample was appended
@@ -611,6 +618,10 @@ class ControlUI:
                         set_ui_locked(self, True)
                     except Exception:
                         pass
+                    try:
+                        self._stop_meas_button.configure(state=tk.NORMAL)
+                    except Exception:
+                        pass
                 self.root.after(0, _mark_running)
                 # construct voltages from min/max/steps inputs
                 try:
@@ -751,7 +762,37 @@ class ControlUI:
                     self.root.after(0, _upd)
 
                 # run the sequence (this may raise on file errors)
-                results = runner.run_sequence(voltages, settling, measure_time, save_path, sample_callback=sample_cb, progress_callback=progress_cb)
+                # read repetitions
+                try:
+                    repetitions = int(self.repetitions_var.get())
+                except Exception:
+                    repetitions = 1
+
+                def step_cb(scan_so_far):
+                    """Called after each voltage step with [(v, avg), ...]."""
+                    def _upd():
+                        try:
+                            if getattr(self, '_result_line', None) is None:
+                                return
+                            self._result_x = [r[0] for r in scan_so_far]
+                            self._result_y = [r[1] for r in scan_so_far]
+                            self._result_line.set_data(self._result_x, self._result_y)
+                            self.ax2.relim()
+                            self.ax2.autoscale_view()
+                            self._result_canvas.draw_idle()
+                        except Exception:
+                            pass
+                    self.root.after(0, _upd)
+
+                self._measure_stop_event.clear()
+                results = runner.run_sequence(
+                    voltages, settling, measure_time, save_path,
+                    sample_callback=sample_cb,
+                    progress_callback=progress_cb,
+                    step_callback=step_cb,
+                    repetitions=repetitions,
+                    stop_event=self._measure_stop_event,
+                )
                 # update status on main thread with last average and clear running flag
                 def _set_done_status():
                     try:
@@ -779,6 +820,10 @@ class ControlUI:
                         set_ui_locked(self, False)
                     except Exception:
                         pass
+                    try:
+                        self._stop_meas_button.configure(state=tk.DISABLED)
+                    except Exception:
+                        pass
                 self.root.after(0, _set_done_status)
             except Exception as e:
                 # surface errors on the main thread (avoid directly touching Tk variables from worker thread)
@@ -791,6 +836,10 @@ class ControlUI:
                         set_ui_locked(self, False)
                     except Exception:
                         pass
+                    try:
+                        self._stop_meas_button.configure(state=tk.DISABLED)
+                    except Exception:
+                        pass
                 self.root.after(0, _set_error_and_unlock)
 
         t = threading.Thread(target=_worker, daemon=True)
@@ -800,13 +849,19 @@ class ControlUI:
 
     def stop(self):
         self._stop_event.set()
+        self._measure_stop_event.set()
+
+    def _stop_measurement(self):
+        """Signal the running measurement to stop after the current step."""
+        self._measure_stop_event.set()
+        self.measure_status_var.set("Stopping...")
 
     def _load_ini_config(self):
         """Open a file dialog to load measurement parameters from an INI file.
 
         Expected section: [measurement]
         Keys supported:
-          voltage_min, voltage_max, steps, settling, measurement_time, save, save_path
+          voltage_min, voltage_max, steps, settling, measurement_time, repetitions, save, save_path
         """
         try:
             path = filedialog.askopenfilename(title="Select measurement INI", filetypes=[("INI files", "*.ini"), ("All files", "*")])
@@ -859,6 +914,8 @@ class ControlUI:
                     self.measure_time_var.set(mtime)
                     self.save_var.set(bool(save))
                     self.save_path_var.set(spath)
+                    reps = getint('repetitions', self.repetitions_var.get())
+                    self.repetitions_var.set(reps)
                     # show loaded filename (basename)
                     import os
                     self._loaded_config_var.set(os.path.basename(path))

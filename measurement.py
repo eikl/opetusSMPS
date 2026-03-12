@@ -24,11 +24,40 @@ class MeasurementRunner:
         self.sample_interval = float(sample_interval)
 
     def run_sequence(self, voltages: Iterable[float], settling: float, measure_time: float, save_path: Optional[str] = None,
-                     sample_callback=None, progress_callback=None):
-        results = []
-        # compute total duration for progress reporting
-        total_duration = sum((settling + measure_time) for _ in voltages)
-        seq_start = time.time()
+                     sample_callback=None, progress_callback=None, step_callback=None,
+                     repetitions: int = 1, stop_event=None):
+        """Run a voltage-scan measurement sequence.
+
+        Args:
+            repetitions: Number of scan repetitions. Use -1 for indefinite.
+            stop_event: A threading.Event that, when set, aborts the sequence.
+            step_callback: Called after each voltage step with scan_results_so_far.
+        """
+        voltages = list(voltages)
+        continuous = (repetitions < 0)
+        total_reps = max(1, repetitions) if not continuous else 1  # only used for progress
+        all_results = []
+        rep_index = 0
+
+        while True:
+            rep_index += 1
+            if not continuous and rep_index > total_reps:
+                break
+            if stop_event is not None and stop_event.is_set():
+                break
+
+            scan_results = []
+            # Clear the result plot at the start of each new scan
+            if step_callback is not None:
+                try:
+                    step_callback([])
+                except Exception:
+                    pass
+
+            results = []
+            # compute total duration for progress reporting
+            total_duration = sum((settling + measure_time) for _ in voltages)
+            seq_start = time.time()
         # resolve hv setter function (flexible to accept high_voltage module or hardware.hv)
         if hasattr(self.hv, 'set_hv_setpoint'):
             _set_hv = lambda v: self.hv.set_hv_setpoint(v)
@@ -54,80 +83,93 @@ class MeasurementRunner:
             raw_writer = csv.writer(raw_file)
             raw_writer.writerow(['voltage', 'timestamp_utc', 'concentration'])
 
-        for v in voltages:
-            # set HV (flexible)
-            _set_hv(v)
-            # settling: sample periodically so UI can plot and progress can update
-            t_set_start = time.time()
-            set_sample_idx = 0
-            while time.time() - t_set_start < settling:
-                try:
-                    c = float(self.cpc.get_concentration())
-                except Exception:
-                    c = float('nan')
-                # report settling sample to callback
-                try:
-                    if sample_callback:
-                        elapsed = time.time() - seq_start
-                        sample_callback(v, elapsed, c)
-                except Exception:
-                    pass
-                # write raw sample if requested
-                if raw_writer:
+            for v in voltages:
+                if stop_event is not None and stop_event.is_set():
+                    break
+                # set HV (flexible)
+                _set_hv(v)
+                # settling: sample periodically so UI can plot and progress can update
+                t_set_start = time.time()
+                set_sample_idx = 0
+                while time.time() - t_set_start < settling:
+                    if stop_event is not None and stop_event.is_set():
+                        break
                     try:
-                        ts = __import__('datetime').datetime.utcfromtimestamp(time.time()).isoformat() + 'Z'
-                        raw_writer.writerow([v, ts, f"{c}"])
-                        raw_file.flush()
+                        c = float(self.cpc.get_concentration())
+                    except Exception:
+                        c = float('nan')
+                    # report settling sample to callback
+                    try:
+                        if sample_callback:
+                            elapsed = time.time() - seq_start
+                            sample_callback(v, elapsed, c)
                     except Exception:
                         pass
-                # progress update based on total duration
-                try:
-                    if progress_callback:
-                        frac = min(1.0, (time.time() - seq_start) / total_duration) if total_duration > 0 else 1.0
-                        progress_callback(frac)
-                except Exception:
-                    pass
-                set_sample_idx += 1
-                time.sleep(self.sample_interval)
-            # measurement
-            samples = []
-            t_start = time.time()
-            sample_idx = 0
-            while time.time() - t_start < measure_time:
-                try:
-                    c = float(self.cpc.get_concentration())
-                except Exception:
-                    c = float('nan')
-                samples.append(c)
-                # write raw sample if requested
-                if raw_writer:
+                    # write raw sample if requested
+                    if raw_writer:
+                        try:
+                            ts = __import__('datetime').datetime.utcfromtimestamp(time.time()).isoformat() + 'Z'
+                            raw_writer.writerow([v, ts, f"{c}"])
+                            raw_file.flush()
+                        except Exception:
+                            pass
+                    # progress update based on total duration
                     try:
-                        ts = __import__('datetime').datetime.utcfromtimestamp(time.time()).isoformat() + 'Z'
-                        raw_writer.writerow([v, ts, f"{c}"])
-                        # flush to ensure data is on disk
-                        raw_file.flush()
+                        if progress_callback:
+                            frac = min(1.0, (time.time() - seq_start) / total_duration) if total_duration > 0 else 1.0
+                            progress_callback(frac)
                     except Exception:
                         pass
-                sample_idx += 1
-                # report sample to callback (UI can plot) with elapsed since sequence start
-                try:
-                    if sample_callback:
-                        elapsed = time.time() - seq_start
-                        sample_callback(v, elapsed, c)
-                except Exception:
-                    pass
-                # progress update based on total duration
-                try:
-                    if progress_callback:
-                        frac = min(1.0, (time.time() - seq_start) / total_duration) if total_duration > 0 else 1.0
-                        progress_callback(frac)
-                except Exception:
-                    pass
-                time.sleep(self.sample_interval)
-            # compute average ignoring nan
-            valid = [x for x in samples if x == x]
-            avg = sum(valid) / len(valid) if valid else float('nan')
-            results.append((v, avg))
+                    set_sample_idx += 1
+                    time.sleep(self.sample_interval)
+                # measurement
+                samples = []
+                t_start = time.time()
+                sample_idx = 0
+                while time.time() - t_start < measure_time:
+                    if stop_event is not None and stop_event.is_set():
+                        break
+                    try:
+                        c = float(self.cpc.get_concentration())
+                    except Exception:
+                        c = float('nan')
+                    samples.append(c)
+                    # write raw sample if requested
+                    if raw_writer:
+                        try:
+                            ts = __import__('datetime').datetime.utcfromtimestamp(time.time()).isoformat() + 'Z'
+                            raw_writer.writerow([v, ts, f"{c}"])
+                            raw_file.flush()
+                        except Exception:
+                            pass
+                    sample_idx += 1
+                    # report sample to callback (UI can plot) with elapsed since sequence start
+                    try:
+                        if sample_callback:
+                            elapsed = time.time() - seq_start
+                            sample_callback(v, elapsed, c)
+                    except Exception:
+                        pass
+                    # progress update based on total duration
+                    try:
+                        if progress_callback:
+                            frac = min(1.0, (time.time() - seq_start) / total_duration) if total_duration > 0 else 1.0
+                            progress_callback(frac)
+                    except Exception:
+                        pass
+                    time.sleep(self.sample_interval)
+                # compute average ignoring nan
+                valid = [x for x in samples if x == x]
+                avg = sum(valid) / len(valid) if valid else float('nan')
+                results.append((v, avg))
+                scan_results.append((v, avg))
+                if step_callback is not None:
+                    try:
+                        step_callback(list(scan_results))
+                    except Exception:
+                        pass
+
+            all_results.append(results)
 
         if save_path:
             # expand user and ensure parent exists
@@ -138,9 +180,10 @@ class MeasurementRunner:
                 os.makedirs(parent, exist_ok=True)
             with open(save_path_expanded, 'w', newline='') as f:
                 w = csv.writer(f)
-                w.writerow(['voltage', 'concentration_avg'])
-                for v, a in results:
-                    w.writerow([v, a])
+                w.writerow(['scan', 'voltage', 'concentration_avg'])
+                for scan_idx, scan in enumerate(all_results):
+                    for v, a in scan:
+                        w.writerow([scan_idx + 1, v, a])
             # close raw file if opened
             try:
                 if raw_file:
@@ -154,4 +197,5 @@ class MeasurementRunner:
                 progress_callback(1.0)
         except Exception:
             pass
-        return results
+        # return last scan results for backward compatibility
+        return all_results[-1] if all_results else []
