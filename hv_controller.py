@@ -52,6 +52,18 @@ def get_hv_voltage() -> float:
     return float(hv_device.get_voltage())
 
 
+def get_hv_status() -> dict | None:
+    """Query the HV supply status register.
+
+    Returns a dict with 'raw', 'value', 'bits' keys, or None on error.
+    """
+    try:
+        return hv_device.get_status()
+    except Exception as e:
+        print(f'get_hv_status error: {e}')
+        return None
+
+
 def _hv_loop():
     global _hv_last_applied, _hv_send_requested
     while True:

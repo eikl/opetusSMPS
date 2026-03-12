@@ -48,6 +48,23 @@ class DummyHVDevice:
         with self._lock:
             return float(self._voltage)
 
+    def get_status(self):
+        """Return a dummy OK status."""
+        return {
+            'raw': '0000',
+            'value': 0,
+            'bits': {
+                'Enabled': False,
+                'Fault': False,
+                'Over voltage': False,
+                'Over current': False,
+                'Over temperature': False,
+                'Supply rail out of range': False,
+                'HW enable': False,
+                'SW enable': False,
+            },
+        }
+
 
 class DummyCPCDevice:
     """Dummy CPC device that returns a constant concentration value.

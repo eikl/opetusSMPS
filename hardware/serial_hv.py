@@ -55,21 +55,39 @@ class SerialHVDevice:
                 self._connected = False
                 raise
 
-    def disable(self, ser) -> None:
+    def disable(self) -> None:
         try:
-            st=chr(2)+'0106EN=0'+'{:X}'.format(self.chk_sum('0106EN=0'))+chr(10)
-
-            self.write_cmd(st, ser)
-
+            st = chr(2) + '0106EN=0' + '{:X}'.format(self.chk_sum('0106EN=0')) + chr(10)
+            self.write_cmd(st)
         except Exception:
             raise Exception("Failed to disable HV output")
 
-    def write_cmd(self, cmd, ser):
-        cmd_e=cmd.encode()
-        ser.write(cmd_e)
-        print(cmd_e)
-        ser.flush()
-        #time.sleep(0.1)
+    def write_cmd(self, cmd):
+        """Open serial port, send *cmd*, read response, close port.
+
+        Returns the raw response bytes (from ``readline``).
+        """
+        import serial  # type: ignore
+        ser = None
+        try:
+            ser = serial.Serial(self.port, self.baud, timeout=1, write_timeout=1)
+            cmd_e = cmd.encode()
+            ser.write(cmd_e)
+            print('write')
+            print(cmd_e)
+            ser.flush()
+            res = ser.readline()
+            print('response')
+            print(res)
+            ser.flush()
+            return res
+        finally:
+            if ser is not None:
+                time.sleep(0.1)
+                try:
+                    ser.close()
+                except Exception as e:
+                    print(f"Error closing serial port: {e}")
 
     def chk_sum(self, a):
         sum_c=0
@@ -83,71 +101,127 @@ class SerialHVDevice:
         return sum_c
 
     def _format_set_command(self, voltage: float) -> bytes:
-
+        #M0? 
         #    st=chr(2)+'0106V1='+"{:07.1f}".format(voltage)+'{:X}'.format(chk_sum('0106V1='+"{:07.1f}".format(voltage)))+chr(10)
         cmd = chr(2) + '0106V1=' + "{:07.1f}".format(voltage) + '{:X}'.format(self.chk_sum('0106V1=' + "{:07.1f}".format(voltage))) + chr(10)
+        #cmd = chr(2) + '0106CF=1' + "{:07.1f}".format(voltage) + '{:X}'.format(self.chk_sum('0106CF=1' + "{:07.1f}".format(voltage))) + chr(10)
+        #cmd = chr(2) + '0106M0?' + "{:07.1f}".format(voltage) + '{:X}'.format(self.chk_sum('0106M0?' + "{:07.1f}".format(voltage))) + chr(10)
+
         print('voltage set cmd')
         return cmd
 
-    def get_voltage(self) -> float:
-        #get voltage, but not implemented yet
-        return 10
 
-    def read_spellman(self, ser):
-        res = ser.readline()
-        print('response')
-        print(res)
-        ser.flush()
-        return res
-    
-    def set_enable(self, ser):
-        st=chr(2)+'0106EN=1'+'{:X}'.format(self.chk_sum('0106EN=1'))+chr(10)
-        #print(st)
+    # Status register bit definitions
+    STATUS_BITS = {
+        0: 'Enabled',
+        1: 'Fault',
+        2: 'Over voltage',
+        3: 'Over current',
+        4: 'Over temperature',
+        5: 'Supply rail out of range',
+        6: 'HW enable',
+        7: 'SW enable',
+    }
+
+    def get_status(self):
+        """Query the status register and return a parsed dict.
+
+        Returns
+        -------
+        dict  with keys:
+            'raw'   – the raw hex string (e.g. '00C1')
+            'value' – integer value of the register
+            'bits'  – dict  {bit_name: bool, …}  for each defined bit
+        """
+        try:
+            st = chr(2) + '0106SR?' + '{:X}'.format(self.chk_sum('0106SR?')) + chr(10)
+            res = self.write_cmd(st)
+            return self._parse_status(res)
+        except Exception as e:
+            print(f'get_status error: {e}')
+            return None
+
+    def _parse_status(self, raw_response):
+        """Parse a Spellman SR? response into a status dict.
+
+        The response format is ``SR=XXXX`` where XXXX is a 4-character
+        ASCII hex number (16-bit).  The least significant byte (lower 8
+        bits) is the status byte with the defined flag bits.
+        """
+        try:
+            text = raw_response.decode('ascii', errors='ignore') if isinstance(raw_response, bytes) else str(raw_response)
+            idx = text.find('SR=')
+            if idx < 0:
+                return None
+            # Extract all hex chars after SR=
+            hex_str = ''
+            for ch in text[idx + 3:]:
+                if ch in '0123456789abcdefABCDEF':
+                    hex_str += ch
+                else:
+                    break
+            if not hex_str:
+                return None
+            full_val = int(hex_str, 16)
+            # Use only the least significant byte as the status byte
+            status_byte = full_val & 0xFF
+            bits = {}
+            for bit, name in self.STATUS_BITS.items():
+                bits[name] = bool(status_byte & (1 << bit))
+            return {'raw': hex_str, 'value': status_byte, 'bits': bits}
+        except Exception as e:
+            print(f'_parse_status error: {e}')
+            return None
+
+    def get_voltage(self) -> float:
+        """Query the voltage monitor value (M0?).
+
+        Response format: ``M0=xxxxx.x``  – extract the float after ``M0=``.
+        """
+        try:
+            cmd = chr(2) + '0106M0?' + '{:X}'.format(self.chk_sum('0106M0?')) + chr(10)
+            res = self.write_cmd(cmd)
+            text = res.decode('ascii', errors='ignore') if isinstance(res, bytes) else str(res)
+            idx = text.find('M0=')
+            if idx < 0:
+                return self._voltage  # fallback to last setpoint
+            # extract numeric chars (digits, dot, minus) after M0=
+            num_str = ''
+            for ch in text[idx + 3:]:
+                if ch in '0123456789.-':
+                    num_str += ch
+                else:
+                    break
+            if num_str:
+                return float(num_str)
+            return self._voltage
+        except Exception as e:
+            print(f'get_voltage error: {e}')
+            return self._voltage
+
+    def clear_faults(self):
+        st = chr(2) + '0106CF=1' + '{:X}'.format(self.chk_sum('0106CF=1')) + chr(10)
+        print('clear fault cmd')
+        self.write_cmd(st)
+
+    def set_enable(self):
+        st = chr(2) + '0106EN=1' + '{:X}'.format(self.chk_sum('0106EN=1')) + chr(10)
         print('enable cmd')
-        self.write_cmd(st, ser)
-        #print(self.read_spellman(ser))
+        self.write_cmd(st)
 
     def set_voltage(self, voltage: float) -> None:
-        """Set the HV output voltage. Connects, sends command, then disconnects."""
+        """Set the HV output voltage."""
         with self._lock:
             v = int(voltage)
-            # Always open fresh connection for each command
-            serial_obj = None
             try:
-                import serial  # type: ignore
-                print(f"Opening serial port for command: {self.port}")
-                serial_obj = serial.Serial(
-                    self.port, 
-                    self.baud, 
-                    timeout=10,
-                    write_timeout=10
-                )
-                #send enable cmd
-                #self.set_enable(serial_obj)
-
-                # Send command
                 cmd = self._format_set_command(v)
-                self.write_cmd(cmd, serial_obj)
-                #self.disable(serial_obj)
-                res = self.read_spellman(serial_obj)
-                self._voltage = v  # Update stored voltage
-                
-
-                
+                self.write_cmd(cmd)
+                self._voltage = v
             except Exception as e:
                 print(f"Error in HV command: {e}")
                 import traceback
                 traceback.print_exc()
                 raise
-            finally:
-                # Always close the port
-                if serial_obj is not None:
-                    time.sleep(0.1)
-                    try:
-                        serial_obj.close()
-                        print(f"Serial port closed: {self.port}")
-                    except Exception as e:
-                        print(f"Error closing serial port: {e}")
 
 
 

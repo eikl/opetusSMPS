@@ -11,16 +11,16 @@
     "max_charge":6,
     "dmas":[
     {
-        "length":0.109,
+        "length":0.11,
         "outer_radius":3.3e-2,
         "inner_radius":2.5e-2,
-        "sheath_flow":20,
-        "excess_flow":20,
-        "aerosol_flow_in":4,
-        "aerosol_flow_out":4,
+        "sheath_flow":5,
+        "excess_flow":0,
+        "aerosol_flow_in":1,
+        "aerosol_flow_out":1,
         "loss_factor":1.00,
         "fitted_length":5.5,
-        "voltage_channels":16,
+        "voltage_channels":20,
         "index_start":0,
         "index_end":-1,
         "invert": true
