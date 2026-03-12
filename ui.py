@@ -219,8 +219,10 @@ class ControlUI:
         ttk.Entry(mainframe, textvariable=self.repetitions_var, width=10).grid(column=1, row=13, sticky=tk.W)
 
         self.save_var = tk.BooleanVar(value=False)
-        ttk.Checkbutton(mainframe, text="Save to CSV", variable=self.save_var).grid(column=0, row=14, sticky=tk.W)
-        self.save_path_var = tk.StringVar(value="measurements.csv")
+        ttk.Checkbutton(mainframe, text="Save data", variable=self.save_var).grid(column=0, row=14, sticky=tk.W)
+        # Auto-generate DMYYMMDD filename
+        _dm_name = time.strftime('measurements/DM%y%m%d')
+        self.save_path_var = tk.StringVar(value=_dm_name)
         ttk.Entry(mainframe, textvariable=self.save_path_var, width=30).grid(column=1, row=14, columnspan=2, sticky=(tk.W, tk.E))
 
         self.measure_status_var = tk.StringVar(value="Idle")
