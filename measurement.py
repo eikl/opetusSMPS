@@ -139,6 +139,16 @@ class MeasurementRunner:
         else:
             raise AttributeError("HV module has no set_hv_setpoint or set_voltage method")
 
+        # resolve hv status reader function
+        if hasattr(self.hv, 'get_hv_status'):
+            _get_status = self.hv.get_hv_status
+        elif hasattr(self.hv, 'get_status'):
+            _get_status = self.hv.get_status
+        elif hasattr(self.hv, 'device') and hasattr(self.hv.device, 'get_status'):
+            _get_status = self.hv.device.get_status
+        else:
+            _get_status = lambda: None
+
         # prepare raw file if needed
         raw_file = None
         raw_writer = None
@@ -148,13 +158,22 @@ class MeasurementRunner:
         if save_path:
             save_path_expanded = os.path.expanduser(save_path)
             base, ext = os.path.splitext(save_path_expanded)
+            # Add unique numeric suffix to avoid overwriting existing files
+            candidate = base
+            counter = 1
+            while (os.path.exists(f"{candidate}_raw{ext or '.csv'}")
+                   or os.path.exists(f"{candidate}.DAT")
+                   or os.path.exists(f"{candidate}.FLW")):
+                candidate = f"{base}_{counter:03d}"
+                counter += 1
+            base = candidate
             raw_path = f"{base}_raw{ext or '.csv'}"
             parent = os.path.dirname(save_path_expanded)
             if parent:
                 os.makedirs(parent, exist_ok=True)
             raw_file = open(raw_path, 'w', newline='')
             raw_writer = csv.writer(raw_file)
-            raw_writer.writerow(['voltage', 'timestamp_utc', 'concentration'])
+            raw_writer.writerow(['voltage', 'timestamp_utc', 'concentration', 'hv_status'])
             # Open DAT and FLW files for incremental writing
             dat_path = base + '.DAT'
             flw_path = base + '.FLW'
@@ -186,10 +205,29 @@ class MeasurementRunner:
                 results = []
                 total_duration = sum((settling + measure_time) for _ in voltages)
 
-                for v in voltages:
+                scan_start_delay = float(get_float('SCAN_START_DELAY', 10.0))
+
+                for vi, v in enumerate(voltages):
                     if stop_event is not None and stop_event.is_set():
                         break
                     _set_hv(v)
+
+                    # wait extra delay after setting the first voltage of each scan
+                    if vi == 0 and scan_start_delay > 0:
+                        t_delay_start = time.time()
+                        while time.time() - t_delay_start < scan_start_delay:
+                            if stop_event is not None and stop_event.is_set():
+                                break
+                            try:
+                                c = float(self.cpc.get_concentration())
+                            except Exception:
+                                c = float('nan')
+                            if sample_callback:
+                                try:
+                                    sample_callback(v, time.time() - seq_start, c)
+                                except Exception:
+                                    pass
+                            time.sleep(0.2)
 
                     # settling phase
                     t_set_start = time.time()
@@ -208,7 +246,9 @@ class MeasurementRunner:
                         if raw_writer:
                             try:
                                 ts = __import__('datetime').datetime.utcfromtimestamp(time.time()).isoformat() + 'Z'
-                                raw_writer.writerow([v, ts, f"{c}"])
+                                st = _get_status()
+                                sb = f"0x{st['value']:02X}" if isinstance(st, dict) and 'value' in st else ''
+                                raw_writer.writerow([v, ts, f"{c}", sb])
                                 raw_file.flush()
                             except Exception:
                                 pass
@@ -234,7 +274,9 @@ class MeasurementRunner:
                         if raw_writer:
                             try:
                                 ts = __import__('datetime').datetime.utcfromtimestamp(time.time()).isoformat() + 'Z'
-                                raw_writer.writerow([v, ts, f"{c}"])
+                                st = _get_status()
+                                sb = f"0x{st['value']:02X}" if isinstance(st, dict) and 'value' in st else ''
+                                raw_writer.writerow([v, ts, f"{c}", sb])
                                 raw_file.flush()
                             except Exception:
                                 pass
@@ -298,11 +340,11 @@ class MeasurementRunner:
 
         # write summary CSV
         if save_path:
-            save_path_expanded = os.path.expanduser(save_path)
-            parent = os.path.dirname(save_path_expanded)
-            if parent:
-                os.makedirs(parent, exist_ok=True)
-            with open(save_path_expanded, 'w', newline='') as f:
+            summary_path = base + (ext or '.csv')
+            summary_parent = os.path.dirname(summary_path)
+            if summary_parent:
+                os.makedirs(summary_parent, exist_ok=True)
+            with open(summary_path, 'w', newline='') as f:
                 w = csv.writer(f)
                 w.writerow(['scan', 'voltage', 'concentration_avg'])
                 for scan_idx, scan in enumerate(all_results):
