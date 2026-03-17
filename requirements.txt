@@ -1,5 +1,13 @@
-matplotlib==3.10.7
+GP8XXX_IIC==0.0.4
+GP8XXX_IIC==0.0.4
+h5py==3.16.0
+ipython==9.11.0
+matplotlib==3.10.8
+numpy==2.4.3
+pandas==3.0.1
 pyserial==3.5
+scipy==1.17.1
 sensirion_i2c_driver==1.0.2
 sensirion_i2c_sdp==0.1.1
 simple_pid==2.0.1
+smbus2==0.6.0
