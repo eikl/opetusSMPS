@@ -12,6 +12,7 @@ try:
     matplotlib.use('TkAgg')
     from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
     import matplotlib.pyplot as plt
+    from matplotlib import ticker
     _HAS_MATPLOTLIB = True
 except Exception:
     _HAS_MATPLOTLIB = False
@@ -27,9 +28,38 @@ class ControlUI:
         self.blower = blower_module
 
         root.title("opetusSMPS")
+        root.resizable(True, True)
+        root.columnconfigure(0, weight=1)
+        root.rowconfigure(0, weight=1)
 
-        mainframe = ttk.Frame(root, padding="10")
-        mainframe.grid(column=0, row=0, sticky=(tk.N, tk.W, tk.E, tk.S))
+        screen_w = root.winfo_screenwidth()
+        screen_h = root.winfo_screenheight()
+        target_w = int(screen_w * 0.92)
+        target_h = int(screen_h * 0.90)
+        root.geometry(f"{target_w}x{target_h}")
+        root.minsize(1100, 680)
+
+        self._outer = ttk.Frame(root)
+        self._outer.grid(column=0, row=0, sticky=(tk.N, tk.S, tk.W, tk.E))
+        self._outer.columnconfigure(0, weight=1)
+        self._outer.rowconfigure(0, weight=1)
+
+        self._canvas_container = tk.Canvas(self._outer, highlightthickness=0)
+        self._canvas_container.grid(column=0, row=0, sticky=(tk.N, tk.S, tk.W, tk.E))
+        self._v_scrollbar = ttk.Scrollbar(self._outer, orient=tk.VERTICAL, command=self._canvas_container.yview)
+        self._v_scrollbar.grid(column=1, row=0, sticky=(tk.N, tk.S))
+        self._canvas_container.configure(yscrollcommand=self._v_scrollbar.set)
+
+        mainframe = ttk.Frame(self._canvas_container, padding="8")
+        self._mainframe_window = self._canvas_container.create_window((0, 0), window=mainframe, anchor=tk.NW)
+        self._canvas_container.bind('<Configure>', self._on_canvas_configure)
+        mainframe.bind('<Configure>', self._on_mainframe_configure)
+        self._canvas_container.bind_all('<MouseWheel>', self._on_mousewheel)
+        self._canvas_container.bind_all('<Shift-MouseWheel>', self._block_horizontal_scroll)
+        self._canvas_container.bind_all('<Button-4>', self._on_mousewheel_linux)
+        self._canvas_container.bind_all('<Button-5>', self._on_mousewheel_linux)
+
+        self._mainframe = mainframe
 
         # HV controls
         ttk.Label(mainframe, text="High Voltage (V)").grid(column=0, row=0, sticky=tk.W)
@@ -42,7 +72,7 @@ class ControlUI:
         self.hv_set_scale = ttk.Scale(
             mainframe,
             orient=tk.HORIZONTAL,
-            length=300,
+            length=480,
             from_=0.0,
             to=5000.0,
             variable=self.hv_set_var,
@@ -76,7 +106,7 @@ class ControlUI:
         self.blower_set_scale = ttk.Scale(
             mainframe,
             orient=tk.HORIZONTAL,
-            length=300,
+            length=480,
             from_=0.0,
             to=200.0,
             variable=self.blower_set_var,
@@ -220,10 +250,11 @@ class ControlUI:
 
         self.save_var = tk.BooleanVar(value=False)
         ttk.Checkbutton(mainframe, text="Save data", variable=self.save_var).grid(column=0, row=14, sticky=tk.W)
-        # Auto-generate DMYYMMDD filename
-        _dm_name = time.strftime('measurements/DM%y%m%d')
+        # Auto-generate DMYYMMDD_HHMMSS filename (remove _HHMMSS part if not needed)
+        _dm_name = time.strftime('measurements/DM%y%m%d_%H%M%S')
         self.save_path_var = tk.StringVar(value=_dm_name)
-        ttk.Entry(mainframe, textvariable=self.save_path_var, width=30).grid(column=1, row=14, columnspan=2, sticky=(tk.W, tk.E))
+        self.save_path_entry = ttk.Entry(mainframe, textvariable=self.save_path_var, width=30)
+        self.save_path_entry.grid(column=1, row=14, columnspan=2, sticky=(tk.W, tk.E))
 
         self.measure_status_var = tk.StringVar(value="Idle")
         ttk.Label(mainframe, textvariable=self.measure_status_var).grid(column=0, row=15, sticky=tk.W)
@@ -231,7 +262,7 @@ class ControlUI:
         self._loaded_config_var = tk.StringVar(value="")
         self._load_button = ttk.Button(mainframe, text="Load .ini", command=self._load_ini_config)
         self._load_button.grid(column=1, row=15, sticky=tk.W)
-        ttk.Label(mainframe, textvariable=self._loaded_config_var).grid(column=0, row=16, columnspan=2, sticky=(tk.W, tk.E))
+        ttk.Label(mainframe, textvariable=self._loaded_config_var).grid(column=0, row=16, columnspan=4, sticky=(tk.W, tk.E))
 
         self._start_button = ttk.Button(mainframe, text="Start Measurement", command=self._start_measurement)
         self._start_button.grid(column=2, row=15)
@@ -240,43 +271,72 @@ class ControlUI:
 
         # Timeseries plot area for CPC
         if _HAS_MATPLOTLIB:
+            # Create a container frame for both plots (centered across full width)
+            _plots_frame = ttk.Frame(mainframe)
+            _plots_frame.grid(column=0, row=17, columnspan=4, pady=(2, 12))
+            _plots_frame.columnconfigure(0, weight=1)
+            _plots_frame.columnconfigure(1, weight=1)
+            _plots_frame.rowconfigure(0, weight=1)
+            
             # live timeseries plot
-            self.fig, self.ax = plt.subplots(figsize=(5, 2))
-            self.ax.set_title('CPC concentration')
-            self.ax.set_xlabel('time (s)')
-            self.ax.set_ylabel('concentration')
+            self.fig, self.ax = plt.subplots(figsize=(4.2, 4.2))
+            self.ax.set_title('CPC concentration', fontsize=9)
+            self.ax.set_xlabel('time (s)', fontsize=8)
+            self.ax.set_ylabel('concentration', fontsize=8)
+            self.ax.tick_params(labelsize=7)
+            try:
+                self.ax.set_box_aspect(1)
+            except Exception:
+                pass
+            self.ax.xaxis.set_major_locator(ticker.MaxNLocator(nbins=6))
             self._plot_line, = self.ax.plot([], [], '-o')
-            self.canvas = FigureCanvasTkAgg(self.fig, master=mainframe)
-            self.canvas.get_tk_widget().grid(column=0, row=16, columnspan=3)
+            self.canvas = FigureCanvasTkAgg(self.fig, master=_plots_frame)
+            self.canvas.get_tk_widget().grid(column=0, row=0, sticky=(tk.W, tk.E, tk.N, tk.S))
             self._plot_x = []
             self._plot_y = []
+            self.fig.subplots_adjust(left=0.12, right=0.95, top=0.92, bottom=0.12)
             # base time for idle plotting (seconds)
             self._plot_base_time = time.time()
 
             # (flow plotting removed per user request)
 
             # result plot: voltage vs average concentration
-            self.fig2, self.ax2 = plt.subplots(figsize=(5, 2))
-            self.ax2.set_title('Measurement result')
-            self.ax2.set_xlabel('voltage (V)')
-            self.ax2.set_ylabel('average concentration')
+            self.fig2, self.ax2 = plt.subplots(figsize=(4.2, 4.2))
+            self.ax2.set_title('Measurement result', fontsize=9)
+            self.ax2.set_xlabel('voltage (V)', fontsize=8)
+            self.ax2.set_ylabel('average concentration', fontsize=8)
+            self.ax2.tick_params(labelsize=7)
+            try:
+                self.ax2.set_box_aspect(1)
+            except Exception:
+                pass
             self.ax2.set_xscale('log')
+            self.ax2.xaxis.set_major_locator(ticker.LogLocator(base=10.0, numticks=6))
+            self.ax2.xaxis.set_minor_locator(ticker.NullLocator())
             self._result_line, = self.ax2.plot([], [], 's-')
-            self._result_canvas = FigureCanvasTkAgg(self.fig2, master=mainframe)
-            self._result_canvas.get_tk_widget().grid(column=0, row=17, columnspan=3)
+            self._result_canvas = FigureCanvasTkAgg(self.fig2, master=_plots_frame)
+            self._result_canvas.get_tk_widget().grid(column=1, row=0, sticky=(tk.W, tk.E, tk.N, tk.S))
             self._result_x = []
             self._result_y = []
+            self.fig2.subplots_adjust(left=0.12, right=0.95, top=0.92, bottom=0.12)
         else:
             self._plot_line = None
             self._result_line = None
-            ttk.Label(mainframe, text="Matplotlib not available; no plot").grid(column=0, row=16, columnspan=3)
+            ttk.Label(mainframe, text="Matplotlib not available; no plot").grid(column=1, row=17, columnspan=2)
 
         # Progress bar for overall measurement
         self.progress = ttk.Progressbar(mainframe, orient='horizontal', mode='determinate')
-        self.progress.grid(column=0, row=19, columnspan=3, sticky=(tk.W, tk.E))
+        self.progress.grid(column=0, row=20, columnspan=4, sticky=(tk.W, tk.E))
+
+        mainframe.columnconfigure(0, weight=10)
+        mainframe.columnconfigure(1, weight=0)
+        mainframe.columnconfigure(2, weight=0)
+        mainframe.columnconfigure(3, weight=10)
+        mainframe.rowconfigure(17, weight=1)
+        mainframe.rowconfigure(18, minsize=10)
 
         for child in mainframe.winfo_children():
-            child.grid_configure(padx=5, pady=5)
+            child.grid_configure(padx=4, pady=3)
 
         # start background thread to update current values
         self._stop_event = threading.Event()
@@ -289,6 +349,43 @@ class ControlUI:
         self._updater.start()
         # Start periodic HV status polling (every 5 s)
         self._poll_hv_status()
+
+    def _on_canvas_configure(self, event):
+        try:
+            self._canvas_container.itemconfigure(self._mainframe_window, width=event.width)
+            self._canvas_container.xview_moveto(0)
+        except Exception:
+            pass
+
+    def _on_mainframe_configure(self, _event):
+        try:
+            bbox = self._canvas_container.bbox('all')
+            if bbox is None:
+                return
+            # Keep canvas scrolling vertical-only by clamping horizontal range to viewport width.
+            view_w = self._canvas_container.winfo_width()
+            self._canvas_container.configure(scrollregion=(0, 0, view_w, bbox[3]))
+            self._canvas_container.xview_moveto(0)
+        except Exception:
+            pass
+
+    def _on_mousewheel(self, event):
+        try:
+            self._canvas_container.yview_scroll(int(-1 * (event.delta / 120)), 'units')
+        except Exception:
+            pass
+
+    def _on_mousewheel_linux(self, event):
+        try:
+            if event.num == 4:
+                self._canvas_container.yview_scroll(-1, 'units')
+            elif event.num == 5:
+                self._canvas_container.yview_scroll(1, 'units')
+        except Exception:
+            pass
+
+    def _block_horizontal_scroll(self, _event):
+        return 'break'
 
     # UI locking/refactoring moved to ui_helpers.set_ui_locked
 
