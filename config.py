@@ -30,6 +30,12 @@ def _load_config(path: Optional[str] = None) -> dict[str, str]:
 _CFG_CACHE = _load_config()
 
 
+def reload() -> None:
+    """Re-read config.ini and refresh the in-memory cache."""
+    global _CFG_CACHE
+    _CFG_CACHE = _load_config()
+
+
 def get_str(key: str, default: Optional[str] = None) -> Optional[str]:
     return _CFG_CACHE.get(key, default)
 

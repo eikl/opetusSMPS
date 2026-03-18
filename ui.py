@@ -979,78 +979,52 @@ class ControlUI:
         self.measure_status_var.set("Stopping...")
 
     def _load_ini_config(self):
-        """Open a file dialog to load measurement parameters from an INI file.
-
-        Expected section: [measurement]
-        Keys supported:
-          voltage_min, voltage_max, steps, settling, measurement_time, repetitions, save, save_path
-        """
+        """Reload config.ini and apply updated values to the UI and devices."""
         try:
-            path = filedialog.askopenfilename(title="Select measurement INI", filetypes=[("INI files", "*.ini"), ("All files", "*")])
-            if not path:
-                return
-            cfg = configparser.ConfigParser()
-            cfg.read(path)
-            section = 'measurement'
-            vals = cfg[section] if section in cfg else cfg.defaults() if cfg.defaults() else {}
-            # read values with fallbacks
-            def getfloat(key, fallback):
-                try:
-                    if key in vals:
-                        return float(vals.get(key))
-                except Exception:
-                    pass
-                return fallback
-            def getint(key, fallback):
-                try:
-                    if key in vals:
-                        return int(vals.get(key))
-                except Exception:
-                    pass
-                return fallback
-            def getbool(key, fallback):
-                try:
-                    if key in vals:
-                        v = vals.get(key)
-                        if isinstance(v, bool):
-                            return v
-                        return v.lower() in ('1', 'true', 'yes', 'on')
-                except Exception:
-                    pass
-                return fallback
+            from config import reload as cfg_reload, get_float, get_str
+            cfg_reload()
 
-            # apply to UI vars on main thread
-            def _apply():
+            # Reconnect serial devices in a background thread to avoid blocking the UI
+            def _reconnect_devices():
+                errors = []
                 try:
-                    vmin = getfloat('voltage_min', self.voltage_min_var.get())
-                    vmax = getfloat('voltage_max', self.voltage_max_var.get())
-                    steps = getint('steps', self.voltage_steps_var.get())
-                    settling = getfloat('settling', self.settling_var.get())
-                    mtime = getfloat('measurement_time', self.measure_time_var.get())
-                    save = getbool('save', self.save_var.get())
-                    spath = vals.get('save_path', self.save_path_var.get()) if hasattr(vals, 'get') else self.save_path_var.get()
-                    self.voltage_min_var.set(vmin)
-                    self.voltage_max_var.set(vmax)
-                    self.voltage_steps_var.set(steps)
-                    self.settling_var.set(settling)
-                    self.measure_time_var.set(mtime)
-                    self.save_var.set(bool(save))
-                    self.save_path_var.set(spath)
-                    reps = getint('repetitions', self.repetitions_var.get())
-                    self.repetitions_var.set(reps)
-                    # show loaded filename (basename)
-                    import os
-                    self._loaded_config_var.set(os.path.basename(path))
-                except Exception:
-                    # silently ignore errors while applying; surface minimal status
+                    from cpc_controller import reconnect as cpc_reconnect
+                    cpc_reconnect()
+                except Exception as e:
+                    errors.append(f"CPC: {e}")
+                try:
+                    from hv_controller import reconnect as hv_reconnect
+                    hv_reconnect()
+                except Exception as e:
+                    errors.append(f"HV: {e}")
+
+                def _apply():
                     try:
-                        self._loaded_config_var.set("<invalid ini>")
+                        self.voltage_min_var.set(get_float('VOLTAGE_MIN', self.voltage_min_var.get()))
+                        self.voltage_max_var.set(get_float('VOLTAGE_MAX', self.voltage_max_var.get()))
+                        self.voltage_steps_var.set(int(get_float('STEPS', self.voltage_steps_var.get())))
+                        self.settling_var.set(get_float('SETTLING', self.settling_var.get()))
+                        self.measure_time_var.set(get_float('MEASUREMENT_TIME', self.measure_time_var.get()))
+                        self.repetitions_var.set(int(get_float('REPETITIONS', self.repetitions_var.get())))
+                        save_str = get_str('SAVE', None)
+                        if save_str is not None:
+                            self.save_var.set(save_str.lower() in ('1', 'true', 'yes', 'on'))
+                        spath = get_str('SAVE_PATH', None)
+                        if spath:
+                            self.save_path_var.set(spath)
+                        self._plot_max_seconds = get_float('PLOT_MAX_SECONDS', self._plot_max_seconds)
+                        if errors:
+                            self._loaded_config_var.set("reloaded (errors: " + "; ".join(errors) + ")")
+                        else:
+                            self._loaded_config_var.set("config.ini reloaded")
                     except Exception:
-                        pass
-            self.root.after(0, _apply)
+                        self._loaded_config_var.set("<error applying config>")
+                self.root.after(0, _apply)
+
+            threading.Thread(target=_reconnect_devices, daemon=True).start()
         except Exception:
             try:
-                self._loaded_config_var.set("<error>")
+                self._loaded_config_var.set("<reload error>")
             except Exception:
                 pass
 

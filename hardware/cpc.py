@@ -32,3 +32,33 @@ else:
     from hardware.dummy_devices import DummyCPCDevice
     device = DummyCPCDevice(sample_interval=get_float('CPC_SAMPLE_INTERVAL', 1.0))
     device.connect()
+
+
+def reconnect():
+    """Re-read config and reconnect the CPC device.
+
+    Replaces the module-level ``device`` with a freshly configured instance.
+    """
+    global device
+    # disconnect old device
+    try:
+        device.disconnect()
+    except Exception:
+        pass
+
+    use_serial = str(get_str('USE_SERIAL_CPC', '0')).strip().lower() in ('1', 'true', 'yes', 'on')
+    port = get_str('CPC_SERIAL_PORT', None) or None
+
+    if use_serial and port:
+        from hardware.serial_cpc import SerialCPCDevice
+        cpc_type = get_str('CPC_TYPE', 'TSI3010')
+        baud_override = get_str('CPC_SERIAL_BAUD', None)
+        baud = int(baud_override) if baud_override else None
+        device = SerialCPCDevice(port=port, baud=baud,
+                                 sample_interval=get_float('CPC_SAMPLE_INTERVAL', 1.0),
+                                 cpc_type=cpc_type)
+        device.connect()
+    else:
+        from hardware.dummy_devices import DummyCPCDevice
+        device = DummyCPCDevice(sample_interval=get_float('CPC_SAMPLE_INTERVAL', 1.0))
+        device.connect()

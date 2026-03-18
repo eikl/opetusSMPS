@@ -10,6 +10,7 @@ configured sample interval when available.
 """
 from hardware.cpc import device as cpc_device
 from config import get_float
+import hardware.cpc as _cpc_hw
 import threading
 import time
 
@@ -20,7 +21,7 @@ def _cpc_loop():
         try:
             # allow the adapter to advance its internal model if it supports step()
             try:
-                cpc_device.step(UPDATE_INTERVAL)
+                _cpc_hw.device.step(UPDATE_INTERVAL)
             except Exception:
                 pass
         except Exception:
@@ -36,7 +37,12 @@ def start_cpc():
 
 def get_concentration():
     """Return concentration as float, or None if no response."""
-    v = cpc_device.get_concentration()
+    v = _cpc_hw.device.get_concentration()
     if v is None:
         return None
     return float(v)
+
+
+def reconnect():
+    """Re-read config and reconnect the CPC device."""
+    _cpc_hw.reconnect()

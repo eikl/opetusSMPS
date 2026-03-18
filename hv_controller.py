@@ -13,6 +13,7 @@ Internally delegates to `hardware.hv.device` for actual hardware/simulator.
 """
 from hardware.hv import device as hv_device
 from config import get_float
+import hardware.hv as _hv_hw
 import time
 import threading
 
@@ -49,7 +50,7 @@ def get_hv_setpoint() -> float:
 
 
 def get_hv_voltage() -> float:
-    return float(hv_device.get_voltage())
+    return float(_hv_hw.device.get_voltage())
 
 
 def get_hv_status() -> dict | None:
@@ -58,7 +59,7 @@ def get_hv_status() -> dict | None:
     Returns a dict with 'raw', 'value', 'bits' keys, or None on error.
     """
     try:
-        return hv_device.get_status()
+        return _hv_hw.device.get_status()
     except Exception as e:
         print(f'get_hv_status error: {e}')
         return None
@@ -75,7 +76,7 @@ def _hv_loop():
             
             # Only send if explicitly requested
             if send_req:
-                hv_device.set_voltage(sp)
+                _hv_hw.device.set_voltage(sp)
                 _hv_last_applied = sp
                 print(f"HV setpoint applied: {sp} V")
         except Exception as e:
@@ -95,3 +96,8 @@ def start_hv():
         return
     _hv_thread = threading.Thread(target=_hv_loop, daemon=True)
     _hv_thread.start()
+
+
+def reconnect():
+    """Re-read config and reconnect the HV device."""
+    _hv_hw.reconnect()
