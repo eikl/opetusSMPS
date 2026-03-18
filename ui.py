@@ -130,9 +130,12 @@ class ControlUI:
             from cpc_controller import get_concentration
             conc = get_concentration()
         except Exception:
-            conc = 0.0
-        self.cpc_current_var = tk.StringVar(value=f"CPC: {conc:.2f}")
-        ttk.Label(mainframe, textvariable=self.cpc_current_var).grid(column=0, row=6, sticky=tk.W)
+            conc = None
+        self.cpc_current_var = tk.StringVar(value=f"CPC: {conc:.2f}" if conc is not None else "CPC: no response")
+        self._cpc_label = ttk.Label(mainframe, textvariable=self.cpc_current_var)
+        self._cpc_label.grid(column=0, row=6, sticky=tk.W)
+        if conc is None:
+            self._cpc_label.configure(foreground='red')
         # Flowmeter current display (will be populated if hardware.flowmeter.device is present)
         try:
             from hardware import flowmeter as _fmhw
@@ -578,9 +581,18 @@ class ControlUI:
                     from cpc_controller import get_concentration
                     conc = get_concentration()
                     # update label on main thread
-                    self.root.after(0, lambda v=conc: self.cpc_current_var.set(f"CPC: {v:.2f}"))
+                    if conc is None:
+                        self.root.after(0, lambda: (
+                            self.cpc_current_var.set("CPC: no response"),
+                            self._cpc_label.configure(foreground='red'),
+                        ))
+                    else:
+                        self.root.after(0, lambda v=conc: (
+                            self.cpc_current_var.set(f"CPC: {v:.2f}"),
+                            self._cpc_label.configure(foreground=''),
+                        ))
                     # if not currently measuring, append to the plot so the plot updates continuously
-                    if (not self._measure_running) and self._plot_line is not None:
+                    if conc is not None and (not self._measure_running) and self._plot_line is not None:
                         now = time.time()
                         if now - self._last_idle_sample >= self._idle_sample_interval:
                             self._last_idle_sample = now

@@ -51,7 +51,7 @@ class SerialCPCDevice:
         self._serial = None
         self.sample_interval = float(sample_interval if sample_interval is not None else get_float('CPC_SAMPLE_INTERVAL', 1.0))
         self._last_sample_time = 0.0
-        self._last_value = float(self._conc)
+        self._last_value = None
 
     def connect(self) -> None:
         with self._lock:
@@ -114,11 +114,11 @@ class SerialCPCDevice:
         except ValueError:
             return None
 
-    def get_concentration(self) -> float:
+    def get_concentration(self) -> Optional[float]:
         with self._lock:
             now = time.time()
             if now - self._last_sample_time < self.sample_interval:
-                return float(self._last_value)
+                return self._last_value
 
             if not self._connected:
                 raise RuntimeError("SerialCPCDevice: not connected")
@@ -126,18 +126,18 @@ class SerialCPCDevice:
                 self._serial.reset_input_buffer()  # type: ignore
                 self._serial.write(self._format_query())  # type: ignore
                 data = self._read_response()
-                print(data)
                 v = self._parse_conc_response(data)
-                print('cpc response', v)
                 if v is not None:
                     self._conc = v
-                val = float(self._conc)
+                    val = v
+                else:
+                    val = None
             except Exception:
-                val = float(self._conc)
+                val = None
 
             self._last_value = val
             self._last_sample_time = now
-            return float(val)
+            return val
 
 
 # default device instance

@@ -34,5 +34,9 @@ def start_cpc():
     _cpc_thread = threading.Thread(target=_cpc_loop, daemon=True)
     _cpc_thread.start()
 
-def get_concentration() -> float:
-    return float(cpc_device.get_concentration())
+def get_concentration():
+    """Return concentration as float, or None if no response."""
+    v = cpc_device.get_concentration()
+    if v is None:
+        return None
+    return float(v)
