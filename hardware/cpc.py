@@ -16,8 +16,10 @@ port = get_str('CPC_SERIAL_PORT', None) or None
 if _use_serial and port:
     try:
         from hardware.serial_cpc import SerialCPCDevice
-        baud = int(get_float('CPC_SERIAL_BAUD', 9600))
-        device = SerialCPCDevice(port=port, baud=baud, sample_interval=get_float('CPC_SAMPLE_INTERVAL', 1.0))
+        cpc_type = get_str('CPC_TYPE', 'TSI3010')
+        baud_override = get_str('CPC_SERIAL_BAUD', None)
+        baud = int(baud_override) if baud_override else None
+        device = SerialCPCDevice(port=port, baud=baud, sample_interval=get_float('CPC_SAMPLE_INTERVAL', 1.0), cpc_type=cpc_type)
         try:
             device.connect()
         except Exception as e:

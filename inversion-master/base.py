@@ -697,7 +697,7 @@ def test():
     #pressure = 0.950e5
     system = DMPS_System.generate_from_json(Path('./dmps_template.json'))
     base = Path('./testdata')
-    mydate = date(2026, 3, 10)
+    mydate = date(2026, 3, 17)
     outfile = './testdata/fresh_start.h5'
     data = system.process(base,mydate)
     #return data
