@@ -1,38 +1,41 @@
-"""Simple .env reader for lightweight configuration.
+"""INI-based configuration reader.
 
-Supports KEY=VALUE pairs. Only minimal parsing; ignores comments and empty lines.
+Reads settings from config.ini using configparser.  All keys across all
+sections are flattened into a single lookup so that existing callers can
+continue using flat key names (e.g. ``get_str('CPC_TYPE')``).
+
+Exported helpers (unchanged API):
+    get_str(key, default)  -> Optional[str]
+    get_float(key, default) -> float
+    get_int(key, default)  -> int
 """
+import configparser
 from pathlib import Path
 from typing import Optional
 
 
-def _load_dotenv(path: Optional[str] = None):
-    p = Path(path or Path.cwd() / '.env')
-    data = {}
-    try:
-        text = p.read_text()
-    except Exception:
-        return data
-    for line in text.splitlines():
-        line = line.strip()
-        if not line or line.startswith('#'):
-            continue
-        if '=' not in line:
-            continue
-        k, v = line.split('=', 1)
-        data[k.strip()] = v.strip().strip('"').strip("'")
+def _load_config(path: Optional[str] = None) -> dict[str, str]:
+    p = Path(path or Path(__file__).resolve().parent / 'config.ini')
+    cp = configparser.ConfigParser()
+    cp.read(str(p))
+    # Flatten all sections into one dict; later sections override earlier ones
+    # on key collision, matching the old .env "last value wins" behaviour.
+    data: dict[str, str] = {}
+    for section in cp.sections():
+        for key, value in cp.items(section):
+            data[key.upper()] = value
     return data
 
 
-_ENV_CACHE = _load_dotenv()
+_CFG_CACHE = _load_config()
 
 
 def get_str(key: str, default: Optional[str] = None) -> Optional[str]:
-    return _ENV_CACHE.get(key, default)
+    return _CFG_CACHE.get(key, default)
 
 
 def get_float(key: str, default: float = 0.0) -> float:
-    v = _ENV_CACHE.get(key)
+    v = _CFG_CACHE.get(key)
     if v is None:
         return float(default)
     try:
@@ -42,7 +45,7 @@ def get_float(key: str, default: float = 0.0) -> float:
 
 
 def get_int(key: str, default: int = 0) -> int:
-    v = _ENV_CACHE.get(key)
+    v = _CFG_CACHE.get(key)
     if v is None:
         return int(default)
     try:
