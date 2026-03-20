@@ -6,12 +6,12 @@ https://sensirion.github.io/python-i2c-sdp/
 
 Install with: pip install sensirion-i2c-sdp
 
-Configuration via .env keys:
+Configuration via config.ini [pressure] section:
 
-- USE_I2C_PRESSURE: '1' or 'true' to request real I2C hardware
-- PRESSURE_I2C_BUS: I2C bus number (default 1)
-- PRESSURE_I2C_ADDRESS: I2C address (default 0x25, use 0x26 for alternate address)
-- AEROSOL_FLOW_CALIBRATION: Calibration factor to convert differential pressure to L/min
+- use_i2c_pressure: '1' or 'true' to request real I2C hardware
+- pressure_i2c_bus: I2C bus number (default 1)
+- pressure_i2c_address: I2C address (default 0x25, use 0x26 for alternate address)
+- aerosol_flow_calibration: Calibration factor to convert differential pressure to L/min
 
 SDP8xx I2C addresses:
 - SDP8xx supports 0x25 (default) and 0x26
@@ -188,43 +188,37 @@ def calibrate_for_1lpm(dev) -> float:
     return factor
 
 
-def save_calibration_to_env(factor: float, env_path: str = None):
-    """Save the calibration factor to the .env file.
+def save_calibration_to_config(factor: float, config_path: str = None):
+    """Save the calibration factor to config.ini.
     
     Args:
         factor: The calibration factor to save
-        env_path: Path to the .env file (defaults to .env in current directory)
+        config_path: Path to config.ini (defaults to config.ini next to this package)
     """
+    import configparser
     from pathlib import Path
     
-    if env_path is None:
-        env_path = Path.cwd() / '.env'
+    if config_path is None:
+        config_path = Path(__file__).resolve().parent.parent / 'config.ini'
     else:
-        env_path = Path(env_path)
+        config_path = Path(config_path)
     
-    # Read existing content
-    try:
-        content = env_path.read_text()
-    except Exception:
-        content = ""
+    cp = configparser.ConfigParser()
+    cp.read(str(config_path))
     
-    # Update or add AEROSOL_FLOW_CALIBRATION
-    lines = content.splitlines()
-    new_lines = []
-    found = False
-    for line in lines:
-        if line.strip().startswith('AEROSOL_FLOW_CALIBRATION'):
-            new_lines.append(f'AEROSOL_FLOW_CALIBRATION = {factor}')
-            found = True
-        else:
-            new_lines.append(line)
+    if not cp.has_section('pressure'):
+        cp.add_section('pressure')
     
-    if not found:
-        new_lines.append(f'AEROSOL_FLOW_CALIBRATION = {factor}')
+    cp.set('pressure', 'aerosol_flow_calibration', str(factor))
     
-    # Write back
-    env_path.write_text('\n'.join(new_lines) + '\n')
-    print(f"Saved AEROSOL_FLOW_CALIBRATION = {factor} to {env_path}")
+    with open(config_path, 'w') as f:
+        cp.write(f)
+    
+    # Refresh the in-memory config cache
+    from config import reload
+    reload()
+    
+    print(f"Saved aerosol_flow_calibration = {factor} to {config_path}")
 
 
 # Decide which implementation to expose as `device`

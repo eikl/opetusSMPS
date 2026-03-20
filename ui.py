@@ -456,13 +456,13 @@ class ControlUI:
             # Apply the new calibration factor to the device
             dp_dev.set_calibration_factor(factor)
             
-            # Save to .env file
-            dpm.save_calibration_to_env(factor)
+            # Save to config.ini
+            dpm.save_calibration_to_config(factor)
             
             messagebox.showinfo(
                 "Calibration Complete",
                 f"Calibration factor set to {factor:.6f}\n\n"
-                f"Saved to .env file.\n"
+                f"Saved to config.ini.\n"
                 f"Aerosol flow should now read ~1.0 L/min."
             )
         except Exception as e:
