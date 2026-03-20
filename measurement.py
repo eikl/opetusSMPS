@@ -229,6 +229,7 @@ class MeasurementRunner:
                     # wait extra delay after setting the first voltage of each scan
                     if vi == 0 and scan_start_delay > 0:
                         t_delay_start = time.time()
+                        _iter = 0
                         while time.time() - t_delay_start < scan_start_delay:
                             if stop_event is not None and stop_event.is_set():
                                 break
@@ -241,10 +242,14 @@ class MeasurementRunner:
                                     sample_callback(v, time.time() - seq_start, c)
                                 except Exception:
                                     pass
-                            time.sleep(self.sample_interval)
+                            _iter += 1
+                            _remaining = t_delay_start + _iter * self.sample_interval - time.time()
+                            if _remaining > 0:
+                                time.sleep(_remaining)
 
                     # settling phase
                     t_set_start = time.time()
+                    _iter = 0
                     while time.time() - t_set_start < settling:
                         if stop_event is not None and stop_event.is_set():
                             break
@@ -272,11 +277,15 @@ class MeasurementRunner:
                                 progress_callback(frac)
                             except Exception:
                                 pass
-                        time.sleep(self.sample_interval)
+                        _iter += 1
+                        _remaining = t_set_start + _iter * self.sample_interval - time.time()
+                        if _remaining > 0:
+                            time.sleep(_remaining)
 
                     # measurement phase
                     samples = []
                     t_start = time.time()
+                    _iter = 0
                     while time.time() - t_start < measure_time:
                         if stop_event is not None and stop_event.is_set():
                             break
@@ -305,7 +314,10 @@ class MeasurementRunner:
                                 progress_callback(frac)
                             except Exception:
                                 pass
-                        time.sleep(self.sample_interval)
+                        _iter += 1
+                        _remaining = t_start + _iter * self.sample_interval - time.time()
+                        if _remaining > 0:
+                            time.sleep(_remaining)
 
                     # compute average ignoring nan
                     valid = [x for x in samples if x == x]
