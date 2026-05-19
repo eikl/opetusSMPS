@@ -84,8 +84,7 @@ def measurement_step():
         dp = sizes[current_size_index]
         flow = ctl.Flowmeter.get_flow()
         sheath_val = parse_sheath_value(flow) 
-        ctl.HV.voltage_set(nidaq_device.value, analog_voltage)
-        measured_voltage = ctl.read_ai_voltage(nidaq_device.value, "ai0")
+        ctl.HV.voltage_set(2, analog_voltage)
 
     # --- measuring phase ---
     if phase == "measuring":
@@ -93,14 +92,14 @@ def measurement_step():
 
         # do one measurement sample
         cpc_count = ctl.cpc_read(cpc_port=cpc_com_port.value)
-        flow, temp, press = map(float, ctl.read_sheath_flow_mbed(flowmeter_baud=38400, flowmeter_port=flowmeter_com_port.value))
+        flow, temp, press = map(float, ctl.read_sheath_flow_mbed(flowmeter_baud=38400, flowmeter_port="COM3"))
         sheath_val = parse_sheath_value(flow) or float(sheath_slider.value)
 
         
         ctl.set_sheath_flow(float(sheath_slider.value))
 
         analog_voltage = ctl.voltage_from_size(dp, Q_sh_lpm=sheath_val, P=float(press)*1000, debug=False)
-        ctl.set_daq_voltage(nidaq_device.value, analog_voltage)
+        ctl.set_daq_voltage(2, analog_voltage)
         #measured_voltage = ctl.read_ai_voltage(nidaq_device.value, "ai0")
 
         row = {
@@ -225,7 +224,7 @@ start_button.param.watch(on_start_change, 'value')
 #### Layout ####
 layout = pn.Column(
     "# DMA / CPC Control GUI",
-    pn.Row(cpc_com_port, nidaq_device, flowmeter_com_port),
+    pn.Row(cpc_com_port),
     "# CPC / DMA control panel",
     pn.Row(start_button, status_text),
     pn.Row(sheath_slider, size_selector),
@@ -239,3 +238,13 @@ layout = pn.Column(
 
 
 layout.servable()
+
+# To host it via tailscale. Should be at https://100.77.46.12:5006 then since rPI is pi@100.77.46.12:5006
+# Also add your tailscale ip to the websocket_origin list below if you want to access it from there. 
+pn.serve(
+    layout,
+    address="0.0.0.0",
+    port=5006,
+    show=False,
+    websocket_origin=["100.77.46.12:5006", "100.104.173.10:5006", "localhost:5006"],
+)

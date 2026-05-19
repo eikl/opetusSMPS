@@ -124,3 +124,11 @@ class BlowerDAC:
     def get_parameter(self):
         return self.voltage
 
+if __name__ == "__main__":
+    blower = BlowerDAC()
+    blower.set_voltage(0)
+    cp = CPC("/dev/ttyAMA0")
+    
+    while True:
+        print(f"CP voltage set to: {cp.read_instrument()} V")
+    

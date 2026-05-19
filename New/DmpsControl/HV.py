@@ -1,8 +1,8 @@
 import numpy as np 
-from .hardware import HaukeDMA
+from hardware import HaukeDMA
 import time
 import spidev
-#import RPi.GPIO as GPIO
+import RPi.GPIO as GPIO
 
 
 pin_sclk = 23
@@ -71,35 +71,26 @@ def DACValue(value, debug= False):
 spi = spidev.SpiDev()
 
 def setup():
-    GPIO.setmode(GPIO.BCM)
-    GPIO.setup(pin_sync, GPIO.OUT)
-    GPIO.output(pin_sync, GPIO.HIGH)
-
-    spi.open(0, 0)              
+    spi.open(0, 0)          # because you have /dev/spidev10.0
     spi.max_speed_hz = 1_000_000
-    spi.mode = 0b01             
+    spi.mode = 0b01
     spi.bits_per_word = 8
 
 def write_dac8551(code: int):
     code = max(0, min(65535, int(code)))
 
     data = [
-        0x00,           
+        0x00,
         (code >> 8) & 0xFF,
         code & 0xFF,
     ]
 
-    GPIO.output(pin_sync, GPIO.LOW)
     spi.xfer2(data)
-    GPIO.output(pin_sync, GPIO.HIGH)
-
-
 
 def cleanup():
     spi.close()
-    GPIO.cleanup()
 
-    
+
     
 def voltage_set(dp):
     voltage = voltage_from_size(dp, debug=True)
@@ -111,11 +102,12 @@ def voltage_set(dp):
 
 def test():
     for code in [0, 16384, 32768, 49152, 65535]:
+        print(f"Setting DAC to code: {code}")
         write_dac8551(code)
         time.sleep(1)
 
 def zero():
-    write_dac8551(32705)
+    write_dac8551(32705)  # 0 V
     time.sleep(1)
 
 def hv():
@@ -123,14 +115,9 @@ def hv():
     time.sleep(1)
 
 if __name__ == "__main__":
-    voltage_set(-20)
-    voltage_set(20)
-'''    setup()
+    setup()
+    time.sleep(1)
     try:
-        while True:
-            zero()
-            # test()
-            # hv()
+        zero()
     finally:
         cleanup()
-    '''
