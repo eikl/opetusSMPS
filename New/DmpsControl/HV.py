@@ -101,10 +101,10 @@ def cleanup():
 
     
     
-def run(dp):
+def voltage_set(dp):
     voltage = voltage_from_size(dp, debug=True)
     value = DACValue(voltage, debug=True)
-    #write_dac8551(value)
+    write_dac8551(value)
     
 
 def test():
@@ -121,8 +121,8 @@ def hv():
     time.sleep(1)
 
 if __name__ == "__main__":
-    run(-20)
-    run(20)
+    voltage_set(-20)
+    voltage_set(20)
 '''    setup()
     try:
         while True:
