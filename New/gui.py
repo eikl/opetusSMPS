@@ -19,6 +19,7 @@ pn.extension("plotly")
 cpc_com_port = pn.widgets.TextInput(name="CPC COM port", value="/dev/ttyUSB0")
 
 start_button = pn.widgets.Toggle(name="Start measurement", button_type="success")
+init_button = pn.widgets.Button(name="Initialize hardware", button_type="primary")
 sheath_slider = pn.widgets.IntInput(name="Sheath flow setpoint (L/min)", value=int(14), step=1)
 size_selector = pn.widgets.ArrayInput(
     name="Sizes (nm)",
@@ -41,9 +42,11 @@ phase = "idle"
 phase_start_time = time.time()
 
 def init():
+    flowmeter = ctl.Flowmeter()
+    blower = ctl.BlowerDAC()
     ctl.setup()
     ctl.voltage_set(1)
-    ctl.set_flow(sheath_slider.value)
+    ctl.blower.set_flow(flowmeter, blower, flow_lpm=float(sheath_slider.value))
 
 def get_sizes():
     try:
@@ -225,13 +228,14 @@ plot_pane = pn.bind(make_plot, table_pane.param.value)
 
 
 start_button.param.watch(on_start_change, 'value')
+init_button.param.watch(lambda event: init(), 'value')
 
 #### Layout ####
 layout = pn.Column(
     "# DMA / CPC Control GUI",
     pn.Row(cpc_com_port),
     "# CPC / DMA control panel",
-    pn.Row(start_button, status_text),
+    pn.Row(start_button, status_text, init_button),
     pn.Row(sheath_slider, size_selector),
     pn.Row(meas_time, sleep_time),
     "### Live data",
@@ -244,7 +248,7 @@ layout = pn.Column(
 
 layout.servable()
 
-# To host it via tailscale. Should be at https://100.77.46.12:5006 then since rPI is pi@100.77.46.12:5006
+# To host it via tailscale. Should be at http://100.77.46.12:5006 then since rPI is pi@100.77.46.12:5006
 # Also add your tailscale ip to the websocket_origin list below if you want to access it from there. 
 pn.serve(
     layout,
