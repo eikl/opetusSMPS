@@ -16,11 +16,7 @@ import plotly.express as px
 pn.extension("plotly")
 
 #### Widgets ####
-cpc_com_port = pn.widgets.TextInput(name="CPC COM port", value="COM9")
-nidaq_device = pn.widgets.TextInput(name="NI DAQ Device", value="Dev2")
-flowmeter_com_port = pn.widgets.TextInput(name="Flowmeter COM port", value="COM5")
-
-measured_voltage = 0
+cpc_com_port = pn.widgets.TextInput(name="CPC COM port", value="/dev/ttyUSB0")
 
 start_button = pn.widgets.Toggle(name="Start measurement", button_type="success")
 sheath_slider = pn.widgets.IntInput(name="Sheath flow setpoint (L/min)", value=int(14), step=1)
@@ -38,7 +34,6 @@ status_text = pn.pane.Markdown("Status: idle")
 last_row_pane = pn.pane.Str("Last measurement: -")
 table_pane = pn.widgets.DataFrame(pd.DataFrame(columns=["time","size_nm","analog_voltage","cpc_count","sheath_flow"]),
                                   height=200, width=800)
-
 
 rows = []
 current_size_index = 0
@@ -85,13 +80,11 @@ def measurement_step():
         phase_start_time = now
         current_size_index = 0
 
-        ctl.set_sheath_flow(float(sheath_slider.value))
+        ctl.set_flow(float(sheath_slider.value))
         dp = sizes[current_size_index]
-        # set voltage for this size once at start
-        flow, temp, press = ctl.read_sheath_flow_mbed(flowmeter_baud=38400, flowmeter_port=flowmeter_com_port.value)
-        sheath_val = parse_sheath_value(flow) or float(sheath_slider.value)
-        analog_voltage = ctl.voltage_from_size(dp, Q_sh_lpm=sheath_val, P=float(press)*1000, debug=False)
-        ctl.set_daq_voltage(nidaq_device.value, analog_voltage)
+        flow = ctl.Flowmeter.get_flow()
+        sheath_val = parse_sheath_value(flow) 
+        ctl.HV.voltage_set(nidaq_device.value, analog_voltage)
         measured_voltage = ctl.read_ai_voltage(nidaq_device.value, "ai0")
 
     # --- measuring phase ---

@@ -1,5 +1,5 @@
 import numpy as np 
-import hardware
+from .hardware import HaukeDMA
 import time
 import spidev
 #import RPi.GPIO as GPIO
@@ -28,7 +28,7 @@ def voltage_from_size(dp_nm, Q_sh_lpm=14.0, T_C=24.0, P=101325, debug=False):
     e = 1.602e-19    
     negative = False
     
-    dma = hardware.HaukeDMA()
+    dma = HaukeDMA()
     r1 = dma.r1    
     r2 = dma.r2
     L = dma.L
@@ -75,9 +75,9 @@ def setup():
     GPIO.setup(pin_sync, GPIO.OUT)
     GPIO.output(pin_sync, GPIO.HIGH)
 
-    spi.open(0, 0)              # SPI bus 0, CE0
+    spi.open(0, 0)              
     spi.max_speed_hz = 1_000_000
-    spi.mode = 0b01             # SPI_MODE1
+    spi.mode = 0b01             
     spi.bits_per_word = 8
 
 def write_dac8551(code: int):
@@ -104,7 +104,9 @@ def cleanup():
 def voltage_set(dp):
     voltage = voltage_from_size(dp, debug=True)
     value = DACValue(voltage, debug=True)
+    
     write_dac8551(value)
+
     
 
 def test():
