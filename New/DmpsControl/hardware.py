@@ -125,6 +125,7 @@ class BlowerDAC:
         return self.voltage
 
 if __name__ == "__main__":
+    
     blower = BlowerDAC()
     blower.set_voltage(0)
     cp = CPC("/dev/ttyAMA0")

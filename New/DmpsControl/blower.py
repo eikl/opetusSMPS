@@ -1,4 +1,4 @@
-from hardware import BlowerDAC, Flowmeter
+from .hardware import BlowerDAC, Flowmeter
 from simple_pid import PID
 import threading
 import time

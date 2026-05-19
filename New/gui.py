@@ -40,6 +40,11 @@ current_size_index = 0
 phase = "idle"  
 phase_start_time = time.time()
 
+def init():
+    ctl.setup()
+    ctl.voltage_set(1)
+    ctl.set_flow(sheath_slider.value)
+
 def get_sizes():
     try:
         arr = np.array(size_selector.value).ravel()

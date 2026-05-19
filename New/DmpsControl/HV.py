@@ -1,5 +1,5 @@
 import numpy as np 
-from hardware import HaukeDMA
+from .hardware import HaukeDMA
 import time
 import spidev
 import RPi.GPIO as GPIO
