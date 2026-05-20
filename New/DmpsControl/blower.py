@@ -4,29 +4,39 @@ import threading
 import time
 
 
-def set_flow(flowmeter, blower, flow_lpm=10):
-    pid = PID(0.005, 0.03, 0, setpoint=flow_lpm)
-    pid.output_limits = (0, 5)
+class FlowController:
+    def __init__(self, flowmeter, blower, flow_lpm=10):
+        self.flowmeter = flowmeter
+        self.blower = blower
+        self.pid = PID(0.005, 0.03, 0, setpoint=flow_lpm)
+        self.pid.output_limits = (0, 5)
+        self.running = False
+        self.out = 0.0
 
-    def loop():
-        while True:
-            flowmeter.step()          # if your Flowmeter needs this
-            pv = flowmeter.get_flow()
-            out = pid(pv)
+    def setpoint(self, flow_lpm):
+        self.pid.setpoint = flow_lpm
 
-            blower.set_voltage(out)
+    def start(self):
+        if self.running:
+            return
+        self.running = True
+        threading.Thread(target=self.loop, daemon=True).start()
 
-            print(f"Flow: {pv:.2f} L/min | DAC: {out:.3f} V")
+    def loop(self):
+        while self.running:
+            self.flowmeter.step()
+            pv = self.flowmeter.get_flow()
+            self.out = self.pid(pv)
+            self.blower.set_voltage(self.out)
             time.sleep(0.05)
-
-    threading.Thread(target=loop, daemon=True).start()
 
 
 if __name__ == "__main__":
     flowmeter = Flowmeter()
     blower = BlowerDAC()
 
-    set_flow(flowmeter, blower, 10)
+    controller = FlowController(flowmeter, blower, 10)
+    controller.start()
 
     while True:
         time.sleep(1)

@@ -92,9 +92,9 @@ def cleanup():
 
 
     
-def voltage_set(dp):
-    voltage = voltage_from_size(dp, debug=True)
-    value = DACValue(voltage, debug=True)
+def voltage_set(dp, Q_sh_lpm=10.0):
+    voltage = voltage_from_size(dp, Q_sh_lpm=Q_sh_lpm)
+    value = DACValue(voltage)
     
     write_dac8551(value)
 
