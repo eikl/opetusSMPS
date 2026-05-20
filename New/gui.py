@@ -497,5 +497,5 @@ pn.serve(
     address="0.0.0.0",
     port=5006,
     show=False,
-    websocket_origin=["100.77.46.12:5006", "100.104.173.10:5006", "localhost:5006"],
+    websocket_origin=["100.77.46.12:5006", "100.104.173.10:5006", "100.104.216.3:5006", "localhost:5006"],
 )
