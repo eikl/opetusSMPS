@@ -272,6 +272,7 @@ def measurement_step(debug=True):
 
         if rows:
             df = pd.DataFrame(rows[-100:])
+            df2 = pd.DataFrame(rows)
             table_pane.value = df
     except Exception as e:
         status_text.object = f"Measurement error: {e}"
@@ -346,9 +347,9 @@ def make_plot(df):
 
 
     fig = make_subplots(
-        rows=2, cols=1,
+        rows=4, cols=1,
         shared_xaxes=True,
-        row_heights=[0.20, 0.80],  # top size, bottom cpc
+        row_heights=[0.20, 0.80, 0.2, 0.80],  # top size, middle cpc, bottom sheath
         vertical_spacing=0.05
     )
 
@@ -361,6 +362,8 @@ def make_plot(df):
         hovertemplate="Size: %{y}<br>Time: %{customdata}<extra></extra>",
         row=1, col=1
     )
+    
+    
 
     fig.add_scatter(
         x=df["time"],
@@ -370,6 +373,39 @@ def make_plot(df):
         customdata=hover_strings,
         hovertemplate="Conc: %{y}<br>Time: %{customdata}<extra></extra>",
         row=2, col=1
+    )
+    
+    dfpos = df[df["size_nm"] > 0]
+    dfneg = df[df["size_nm"] < 0]
+
+    if len(dfpos) > 0 and len(dfneg) > 0:
+        n = min(len(dfpos), len(dfneg))
+
+        ionr = ctl.Chargefraction.ionRatio(
+            dfpos["cpc_count"].astype(float).iloc[-n:].to_numpy(),
+            dfneg["cpc_count"].astype(float).abs().iloc[-n:].to_numpy(),
+        )
+
+        fig.add_scatter(
+            x=dfpos["time"].iloc[-n:],
+            y=ionr,
+            mode="lines",
+            name="Ion ratio (N+/N-)",
+            row=3, col=1,
+        )
+    
+    real_conc = df["cpc_count"].astype(float) / ctl.Chargefraction.gunnWosner(
+    1,
+    df["size_nm"].abs().astype(float))
+
+    fig.add_scatter(
+        x=df["time"],
+        y=real_conc,
+        mode="lines",
+        name="CPC Concentration (#/cm³)",
+        customdata=hover_strings,
+        hovertemplate="Conc: %{y}<br>Time: %{customdata}<extra></extra>",
+        row=4, col=1
     )
 
     fig.update_yaxes(title_text="Size (nm)", row=1, col=1)
