@@ -16,7 +16,8 @@ SETTINGS_FILE = Path("settings.json")
 DEFAULT_SETTINGS = {
     "cpc_com_port": "/dev/ttyAMA0",
     "sheath_flow": 10,
-    "sizes": [10, 15, 20, 25],
+    "size_range": [-200, 200],
+    "size_steps": 20,
     "meas_time": 15,
     "sleep_time": 5,
 }
@@ -43,11 +44,16 @@ start_button = pn.widgets.Toggle(name="Start measurement", button_type="success"
 init_button = pn.widgets.Button(name="Initialize hardware", button_type="primary")
 Stop_button = pn.widgets.Button(name="Stop and zero HV", button_type="danger")
 sheath_slider = pn.widgets.IntInput(name="Sheath flow setpoint (L/min)", value=int(10), step=1)
-size_selector = pn.widgets.ArrayInput(
-    name="Sizes (nm)",
-    value=np.array([10, 15, 20, 25]),  
-    max_array_size=1000,              
-    placeholder="[10, 15, 20, 25]",
+size_range = pn.widgets.ArrayInput(
+    name="Size range [min_nm, max_nm]",
+    value=np.array([-200, 200]),
+    max_array_size=2,
+)
+
+size_steps = pn.widgets.IntInput(
+    name="Log steps per polarity",
+    value=20,
+    step=1,
 )
 
 meas_time = pn.widgets.IntInput(name="Measurement time per size (s)", value=int(15), step=1)
@@ -72,11 +78,14 @@ def ensure_settings_file():
 
 def save_settings():
     settings = {
-        "cpc_com_port": cpc_com_port.value,
-        "sheath_flow": sheath_slider.value,
-        "sizes": list(size_selector.value),
-        "meas_time": meas_time.value,
-        "sleep_time": sleep_time.value,
+        "cpc_com_port": str(cpc_com_port.value),
+        "sheath_flow": int(sheath_slider.value),
+
+        "size_range": [int(x) for x in size_range.value],
+        "size_steps": int(size_steps.value),
+
+        "meas_time": int(meas_time.value),
+        "sleep_time": int(sleep_time.value),
     }
 
     with open(SETTINGS_FILE, "w") as f:
@@ -96,12 +105,8 @@ def load_settings():
         DEFAULT_SETTINGS["sheath_flow"],
     )
 
-    size_selector.value = np.array(
-        settings.get(
-            "sizes",
-            DEFAULT_SETTINGS["sizes"],
-        )
-    )
+    size_range.value = np.array(settings.get("size_range", DEFAULT_SETTINGS["size_range"]))
+    size_steps.value = settings.get("size_steps", DEFAULT_SETTINGS["size_steps"])
 
     meas_time.value = settings.get(
         "meas_time",
@@ -162,9 +167,34 @@ def init():
 
 def get_sizes():
     try:
-        arr = np.array(size_selector.value).ravel()
-        arr = arr[np.isfinite(arr)]
-        return [int(x) for x in arr]
+        limits = np.array(size_range.value).ravel()
+        if len(limits) != 2:
+            raise ValueError("Give [min_nm, max_nm], e.g. [-200, 200]")
+
+        start, end = float(limits[0]), float(limits[1])
+        n = int(size_steps.value)
+
+        if n < 2:
+            raise ValueError("steps must be >= 2")
+
+        sizes = []
+
+        if start < 0:
+            neg_max = abs(start)
+            neg = -np.logspace(0, np.log10(neg_max), n)
+            sizes.extend(neg)
+
+        if end > 0:
+            pos = np.logspace(0, np.log10(end), n)
+            sizes.extend(pos)
+
+        sizes = np.round(sizes).astype(int)
+
+        # remove possible duplicates from rounding, keep order
+        sizes = list(dict.fromkeys(sizes))
+
+        return sizes
+
     except Exception as e:
         status_text.object = f"Size parse error: {e}"
         return []
@@ -246,8 +276,6 @@ def measurement_step(debug=True):
     except Exception as e:
         status_text.object = f"Measurement error: {e}"
         print(f"Measurement error: {e}")
-
-
 
 
 def append_row_csv(path, row):
@@ -364,7 +392,8 @@ plot_pane = pn.bind(make_plot, table_pane.param.value)
 for widget in [
     cpc_com_port,
     sheath_slider,
-    size_selector,
+    size_range,
+    size_steps,
     meas_time,
     sleep_time,
 ]:
@@ -379,7 +408,7 @@ layout = pn.Column(
     pn.Row(cpc_com_port),
     "# CPC / DMA control panel",
     pn.Row(start_button, status_text, init_button, Stop_button),
-    pn.Row(sheath_slider, size_selector),
+    pn.Row(sheath_slider, size_range, size_steps),
     pn.Row(meas_time, sleep_time),
     "### Live data",
     last_row_pane,
