@@ -108,7 +108,6 @@ def test():
 
 def zero():
     write_dac8551(32705)  # 0 V
-    time.sleep(1)
 
 def hv():
     write_dac8551(32000)  # -137 V

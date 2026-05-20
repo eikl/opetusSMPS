@@ -13,6 +13,14 @@ from pathlib import Path
 
 SETTINGS_FILE = Path("settings.json")
 
+DEFAULT_SETTINGS = {
+    "cpc_com_port": "/dev/ttyAMA0",
+    "sheath_flow": 10,
+    "sizes": [10, 15, 20, 25],
+    "meas_time": 15,
+    "sleep_time": 5,
+}
+
 
 #Run with (in terminal) for local and comment the last part with pn.serve:
 #Set-ExecutionPolicy Unrestricted -Scope Process
@@ -33,6 +41,7 @@ cpc_com_port = pn.widgets.TextInput(name="CPC COM port", value="/dev/ttyAMA0")
 
 start_button = pn.widgets.Toggle(name="Start measurement", button_type="success")
 init_button = pn.widgets.Button(name="Initialize hardware", button_type="primary")
+Stop_button = pn.widgets.Button(name="Stop and zero HV", button_type="danger")
 sheath_slider = pn.widgets.IntInput(name="Sheath flow setpoint (L/min)", value=int(10), step=1)
 size_selector = pn.widgets.ArrayInput(
     name="Sizes (nm)",
@@ -44,6 +53,8 @@ size_selector = pn.widgets.ArrayInput(
 meas_time = pn.widgets.IntInput(name="Measurement time per size (s)", value=int(15), step=1)
 sleep_time = pn.widgets.IntInput(name="Sleep time between measurements (s)", value=int(5), step=1)
 
+
+
 status_text = pn.pane.Markdown("Status: idle")
 last_row_pane = pn.pane.Str("Last measurement: -")
 table_pane = pn.widgets.DataFrame(pd.DataFrame(columns=["time","size_nm","analog_voltage","cpc_count","sheath_flow"]),
@@ -54,6 +65,10 @@ current_size_index = 0
 phase = "idle"  
 phase_start_time = time.time()
 
+def ensure_settings_file():
+    if not SETTINGS_FILE.exists():
+        with open(SETTINGS_FILE, "w") as f:
+            json.dump(DEFAULT_SETTINGS, f, indent=2)
 
 def save_settings():
     settings = {
@@ -68,21 +83,62 @@ def save_settings():
         json.dump(settings, f, indent=2)
         
 def load_settings():
-    if not SETTINGS_FILE.exists():
-        return
-
     with open(SETTINGS_FILE, "r") as f:
         settings = json.load(f)
 
-    cpc_com_port.value = settings.get("cpc_com_port", "/dev/ttyAMA0")
-    sheath_slider.value = settings.get("sheath_flow", 10)
-    size_selector.value = np.array(settings.get("sizes", [10,15,20]))
-    meas_time.value = settings.get("meas_time", 15)
-    sleep_time.value = settings.get("sleep_time", 5)
+    cpc_com_port.value = settings.get(
+        "cpc_com_port",
+        DEFAULT_SETTINGS["cpc_com_port"],
+    )
+
+    sheath_slider.value = settings.get(
+        "sheath_flow",
+        DEFAULT_SETTINGS["sheath_flow"],
+    )
+
+    size_selector.value = np.array(
+        settings.get(
+            "sizes",
+            DEFAULT_SETTINGS["sizes"],
+        )
+    )
+
+    meas_time.value = settings.get(
+        "meas_time",
+        DEFAULT_SETTINGS["meas_time"],
+    )
+
+    sleep_time.value = settings.get(
+        "sleep_time",
+        DEFAULT_SETTINGS["sleep_time"],
+    )
+
+ensure_settings_file()
 load_settings()
+
+def stop_and_zero():
+    global phase, current_size_index, phase_start_time, callback
+
+    if start_button.value:
+        start_button.value = False
+    phase = "idle"
+    current_size_index = 0
+    phase_start_time = time.time()
+
+    if callback is not None and callback.running:
+        callback.stop()
+
+    try:
+        ctl.HV.zero()
+    except OSError:
+        ctl.setup()
+        ctl.HV.zero()
+
+    status_text.object = "Status: stopped, HV zeroed"
 
 def init():
     global flowmeter, blower, flow_controller, cpc
+    
 
     if flow_controller is not None:
         return
@@ -92,6 +148,8 @@ def init():
     cpc = ctl.CPC(cpc_com_port.value)
 
     ctl.setup()
+    
+    ctl.HV.zero()
 
     flow_controller = ctl.blower.FlowController(
         flowmeter,
@@ -132,58 +190,63 @@ def measurement_step(debug=True):
     meas_sec = float(meas_time.value)
     sleep_sec = float(sleep_time.value)
 
-    # --- start state ---
-    if phase == "idle":
-        # move to first size
-        phase = "measuring"
-        phase_start_time = now
-        current_size_index = 0
-
-        dp = sizes[current_size_index]
-        flow = flowmeter.get_flow()
-        ctl.HV.voltage_set(dp, Q_sh_lpm=float(sheath_slider.value))
-
-    # --- measuring phase ---
-    if phase == "measuring":
-        dp = sizes[current_size_index]
-
-        # do one measurement sample
-        cpc_count = cpc.read_instrument()
-        flow = flowmeter.get_flow()
-
-        ctl.HV.voltage_set(dp, Q_sh_lpm=float(sheath_slider.value))
-
-
-        RUN_ID = datetime.now().strftime("%Y%m%d")
-
-        LOCAL_LOG = Path("logs") / f"measurement_{RUN_ID}.csv"
-        CLOUD_LOG = None
-        
-        row = {
-            "time": datetime.now().isoformat(),
-            "size_nm": dp,
-            "cpc_count": cpc_count,
-            "sheath_flow": flow,
-            "sheath_setpoint": float(sheath_slider.value),
-        }
-        if debug:
-            print(row)
-
-        rows.append(row)
-        last_row_pane.object = str(row)
-
-        log_row(row, local_log=LOCAL_LOG, cloud_log=CLOUD_LOG)
-
-
-        if now - phase_start_time >= meas_sec:
+    try:
+        # --- start state ---
+        if phase == "idle":
+            # move to first size
+            phase = "measuring"
             phase_start_time = now
-            current_size_index += 1
-            if current_size_index >= len(sizes):
-                current_size_index = 0
+            current_size_index = 0
 
-    if rows:
-        df = pd.DataFrame(rows[-100:])
-        table_pane.value = df
+            dp = sizes[current_size_index]
+            flow = flowmeter.get_flow()
+            ctl.HV.voltage_set(dp, Q_sh_lpm=float(sheath_slider.value))
+
+        # --- measuring phase ---
+        if phase == "measuring":
+            dp = sizes[current_size_index]
+
+            # do one measurement sample
+            cpc_count = cpc.read_instrument()
+            flow = flowmeter.get_flow()
+
+            ctl.HV.voltage_set(dp, Q_sh_lpm=float(sheath_slider.value))
+
+
+            RUN_ID = datetime.now().strftime("%Y%m%d")
+
+            LOCAL_LOG = Path("logs") / f"measurement_{RUN_ID}.csv"
+            CLOUD_LOG = None
+            
+            row = {
+                "time": datetime.now().isoformat(),
+                "size_nm": dp,
+                "cpc_count": cpc_count,
+                "sheath_flow": flow,
+                "sheath_setpoint": float(sheath_slider.value),
+            }
+            if debug:
+                print(row)
+
+            rows.append(row)
+            last_row_pane.object = str(row)
+
+            log_row(row, local_log=LOCAL_LOG, cloud_log=CLOUD_LOG)
+
+
+            if now - phase_start_time >= meas_sec:
+                phase_start_time = now
+                current_size_index += 1
+                if current_size_index >= len(sizes):
+                    current_size_index = 0
+
+        if rows:
+            df = pd.DataFrame(rows[-100:])
+            table_pane.value = df
+    except Exception as e:
+        status_text.object = f"Measurement error: {e}"
+        print(f"Measurement error: {e}")
+
 
 
 
@@ -237,7 +300,7 @@ def on_start_change(event):
 
     else:
         status_text.object = "Status: stopped"
-        if callback is None or not callback.running:
+        if callback is not None and callback.running:
             callback.stop()
 
 
@@ -309,12 +372,13 @@ for widget in [
 
 start_button.param.watch(on_start_change, 'value')
 init_button.on_click(lambda event: init())
+Stop_button.on_click(lambda event: stop_and_zero())
 #### Layout ####
 layout = pn.Column(
     "# DMA / CPC Control GUI",
     pn.Row(cpc_com_port),
     "# CPC / DMA control panel",
-    pn.Row(start_button, status_text, init_button),
+    pn.Row(start_button, status_text, init_button, Stop_button),
     pn.Row(sheath_slider, size_selector),
     pn.Row(meas_time, sleep_time),
     "### Live data",
