@@ -1,4 +1,7 @@
-from .hardware import BlowerDAC, Flowmeter
+if __name__ == "__main__":
+    from hardware import BlowerDAC, Flowmeter
+else:
+    from .hardware import BlowerDAC, Flowmeter
 from simple_pid import PID
 import threading
 import time
@@ -11,7 +14,8 @@ class FlowController:
         self.pid = PID(0.005, 0.03, 0, setpoint=flow_lpm)
         self.pid.output_limits = (0, 5)
         self.running = False
-        self.out = 0.0
+        self.out = 2.5
+        self.blower.set_voltage(self.out)
 
     def setpoint(self, flow_lpm):
         self.pid.setpoint = flow_lpm

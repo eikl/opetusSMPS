@@ -42,6 +42,8 @@ start_button = pn.widgets.Toggle(name="Start measurement", button_type="success"
 init_button = pn.widgets.Button(name="Initialize hardware", button_type="primary")
 stop_button = pn.widgets.Button(name="Stop and zero HV", button_type="danger")
 
+n_scans_plot = pn.widgets.IntInput(name="Number of completed scans to plot",value=3,step=1)
+
 range1 = pn.widgets.ArrayInput(
     name="Range 1 [min,max] nm",
     value=np.array([1, 40]),
@@ -84,6 +86,9 @@ rows = []
 current_size_index = 0
 phase = "idle"
 phase_start_time = time.time()
+scan_rows = []
+completed_scans = []
+scan_number = 0
 
 def ensure_settings_file():
     if not SETTINGS_FILE.exists():
@@ -159,6 +164,29 @@ def bipolar_log_sizes(size_range_value, n, order="negative_then_positive"):
         return pos + neg
     return neg + pos
 
+def save_completed_scan(scan_rows, scan_number):
+    if not scan_rows:
+        return
+
+    run_day = datetime.now().strftime("%Y%m%d")
+    scan_id = f"{run_day}_scan_{scan_number:04d}"
+
+    path = Path("logs/scans") / run_day / f"{scan_id}.csv"
+    path.parent.mkdir(parents=True, exist_ok=True)
+
+    pd.DataFrame(scan_rows).to_csv(path, index=False)
+    print(f"Saved completed scan: {path}", flush=True)
+    
+def get_recent_completed_scans(n=None):
+    if n is None:
+        n = int(n_scans_plot.value)
+
+    if not completed_scans:
+        return pd.DataFrame()
+
+    dfs = completed_scans[-n:]
+    return pd.concat(dfs, ignore_index=True)
+
 def get_scan_program():
     scan = []
 
@@ -221,7 +249,7 @@ def init():
     status_text.object = "Status: hardware initialized"
 
 def measurement_step(debug=True):
-    global current_size_index, phase, phase_start_time
+    global current_size_index, phase, phase_start_time, scan_number
 
     if not start_button.value:
         return
@@ -268,20 +296,32 @@ def measurement_step(debug=True):
                 "cpc_count": cpc_count,
                 "sheath_flow": flow,
                 "sheath_setpoint": q_sheath,
+                "scan_number": scan_number,
             }
 
             if debug:
                 print(row, flush=True)
 
             rows.append(row)
+            scan_rows.append(row)
             last_row_pane.object = str(row)
             log_row(row, local_log=local_log, cloud_log=None)
+            
+            
 
             if now - phase_start_time >= meas_sec:
                 phase_start_time = now
                 current_size_index += 1
                 if current_size_index >= len(scan):
                     current_size_index = 0
+      
+                    current_size_index = 0
+                    scan_number += 1
+
+                    save_completed_scan(scan_rows, scan_number)
+                    completed_scans.append(pd.DataFrame(scan_rows.copy()))
+
+                    scan_rows.clear()
                     ctl.HV.zero()
 
         if rows:
@@ -350,13 +390,13 @@ def make_plot(df):
     df = df.copy()
     df["cpc_float"] = pd.to_numeric(df["cpc_count"], errors="coerce")
 
-    hover_strings = [" ".join(str(t).split("T")[-1:]) for t in df["time"]]
+    hover_strings = df["size_nm"].astype(str).to_list()
 
     fig = make_subplots(
-        rows=4,
+        rows=5,
         cols=1,
         shared_xaxes=True,
-        row_heights=[0.20, 0.80, 0.25, 0.80],
+        row_heights=[0.20, 0.80, 0.25, 0.80, 0.8],
         vertical_spacing=0.05,
     )
 
@@ -366,7 +406,7 @@ def make_plot(df):
         mode="lines+markers",
         name="Particle size (nm)",
         customdata=hover_strings,
-        hovertemplate="Size: %{y}<br>Time: %{customdata}<extra></extra>",
+        hovertemplate="Size: %{y}<br>dp: %{customdata} nm<extra></extra>",
         row=1,
         col=1,
     )
@@ -377,7 +417,7 @@ def make_plot(df):
         mode="lines+markers",
         name="CPC (#/cm³)",
         customdata=hover_strings,
-        hovertemplate="Conc: %{y}<br>Time: %{customdata}<extra></extra>",
+        hovertemplate="Conc: %{y}<br>dp: %{customdata} nm<extra></extra>",
         row=2,
         col=1,
     )
@@ -385,41 +425,97 @@ def make_plot(df):
     fig.add_scatter(
         x=df["time"],
         y=df["sheath_setpoint"],
-        mode="lines+markers",
+        mode="lines",
         name="Sheath setpoint (L/min)",
+        customdata=hover_strings,
+        hovertemplate="Sheath setpoint: %{y}<br>dp: %{customdata} nm<extra></extra>",
         row=3,
         col=1,
     )
 
-    # Optional rough charge-fraction corrected view if your module exists.
-    try:
-        real_conc = df["cpc_float"] / ctl.Chargefraction.gunnWosner(
-            1,
-            df["size_nm"].abs().astype(float),
-        )
-        fig.add_scatter(
-            x=df["time"],
-            y=real_conc,
-            mode="lines+markers",
-            name="CPC / f_charge rough",
-            row=4,
-            col=1,
-        )
-    except Exception:
-        fig.add_scatter(
-            x=df["time"],
-            y=df["cpc_float"],
-            mode="lines+markers",
-            name="CPC copy",
-            row=4,
-            col=1,
+    fig.add_scatter(
+        x=df["time"],
+        y=df["sheath_flow"],
+        mode="lines",
+        name="Sheath flow (L/min)",
+        customdata=hover_strings,
+        hovertemplate="Sheath flow: %{y}<br>dp: %{customdata} nm<extra></extra>",
+        row=3,
+        col=1,
+    )
+
+    df2 = get_recent_completed_scans(int(n_scans_plot.value))
+
+    if df2 is not None and not df2.empty:
+        df2 = df2.copy()
+        df2["cpc_float"] = pd.to_numeric(df2["cpc_count"], errors="coerce")
+        df2["abs_size_nm"] = df2["size_nm"].abs()
+        df2["polarity"] = np.where(df2["size_nm"] > 0, "pos", "neg")
+
+        grouped = (
+            df2.groupby(["scan_number", "abs_size_nm", "polarity"])["cpc_float"]
+            .mean()
+            .reset_index()
         )
 
+        for sn, g in grouped.groupby("scan_number"):
+            pos = g[g["polarity"] == "pos"].rename(columns={"cpc_float": "cpc_pos"})
+            neg = g[g["polarity"] == "neg"].rename(columns={"cpc_float": "cpc_neg"})
+
+            merged = pd.merge(
+                pos[["abs_size_nm", "cpc_pos"]],
+                neg[["abs_size_nm", "cpc_neg"]],
+                on="abs_size_nm",
+                how="inner",
+            ).sort_values("abs_size_nm")
+
+            if merged.empty:
+                continue
+
+            ratio = ctl.Chargefraction.ionRatio(
+                merged["cpc_pos"].to_numpy(),
+                merged["cpc_neg"].to_numpy(),
+            )
+
+            fig.add_scatter(
+                x=merged["abs_size_nm"],
+                y=ratio,
+                mode="lines+markers",
+                name=f"Scan {sn}: CPC + / -",
+                row=4,
+                col=1,
+            )
+            
+            charge_fraction_modified = ctl.Chargefraction.gunnWosner(1, merged["abs_size_nm"].to_numpy(), merged["cpc_pos"].to_numpy(), merged["cpc_neg"].to_numpy(), use_mod=True)
+            charge_fraction_og = ctl.Chargefraction.gunnWosner(1, merged["abs_size_nm"].to_numpy(), merged["cpc_pos"].to_numpy(), merged["cpc_neg"].to_numpy(), use_mod=False)
+            
+            fig.add_scatter(
+                x=merged["abs_size_nm"],
+                y=charge_fraction_modified,
+                mode="lines+markers",
+                name=f"Scan {sn}: charge fraction GW modified",
+                row=5,
+                col=1,
+            )
+            
+            fig.add_scatter(
+                x=merged["abs_size_nm"],
+                y=charge_fraction_og,
+                mode="lines+markers",
+                name=f"Scan {sn}: charge fraction GW",
+                row=5,
+                col=1,
+            )
+
+    fig.update_xaxes(title_text="|dp| (nm)", row=4, col=1)
+
+    fig.update_yaxes(title_text="Charge fraction", row=5, col=1)
+    fig.update_xaxes(title_text="|dp| (nm)", row=5, col=1)
     fig.update_yaxes(title_text="Size (nm)", row=1, col=1)
     fig.update_yaxes(title_text="CPC", row=2, col=1)
     fig.update_yaxes(title_text="Sheath", row=3, col=1)
-    fig.update_yaxes(title_text="Corrected", row=4, col=1)
-    fig.update_xaxes(title_text="Time", row=4, col=1)
+    fig.update_yaxes(title_text="+ / - ratio", row=4, col=1)
+    fig.update_xaxes(title_text="Time", row=3, col=1)
 
     fig.update_layout(
         title="Live DMPS scan",
@@ -468,7 +564,7 @@ layout = pn.Column(
     "### Scan range 2",
     pn.Row(range2, sheath2, steps2),
     scan_pane,
-    pn.Row(meas_time, sleep_time),
+    pn.Row(meas_time, sleep_time, n_scans_plot),
     "### Live data",
     last_row_pane,
     table_pane,

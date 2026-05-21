@@ -22,7 +22,7 @@ class HaukeDMA:
     def __init__(self):
         self.r1 = 0.025
         self.r2 = 0.033
-        self.L = 0.11
+        self.L = 0.28
         
 I2C_BUS = 1
 I2C_ADDRESS = 0x40
