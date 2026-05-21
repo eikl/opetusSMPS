@@ -85,7 +85,6 @@ current_size_index = 0
 phase = "idle"
 phase_start_time = time.time()
 
-
 def ensure_settings_file():
     if not SETTINGS_FILE.exists():
         with open(SETTINGS_FILE, "w") as f:
@@ -138,10 +137,8 @@ def load_settings():
     meas_time.value = settings.get("meas_time", DEFAULT_SETTINGS["meas_time"])
     sleep_time.value = settings.get("sleep_time", DEFAULT_SETTINGS["sleep_time"])
 
-
 ensure_settings_file()
 load_settings()
-
 
 def bipolar_log_sizes(size_range_value, n, order="negative_then_positive"):
     lo, hi = np.array(size_range_value).ravel().astype(float)
@@ -162,7 +159,6 @@ def bipolar_log_sizes(size_range_value, n, order="negative_then_positive"):
         return pos + neg
     return neg + pos
 
-
 def get_scan_program():
     scan = []
 
@@ -174,7 +170,6 @@ def get_scan_program():
 
     return scan
 
-
 def update_scan_preview():
     try:
         scan = get_scan_program()
@@ -182,7 +177,6 @@ def update_scan_preview():
         scan_pane.object = f"Scan points ({len(sizes)}): {sizes}"
     except Exception as e:
         scan_pane.object = f"Scan parse error: {e}"
-
 
 def stop_and_zero():
     global phase, current_size_index, phase_start_time, callback
@@ -205,7 +199,6 @@ def stop_and_zero():
 
     status_text.object = "Status: stopped, HV zeroed"
 
-
 def init():
     global flowmeter, blower, flow_controller, cpc
 
@@ -226,7 +219,6 @@ def init():
     )
     flow_controller.start()
     status_text.object = "Status: hardware initialized"
-
 
 def measurement_step(debug=True):
     global current_size_index, phase, phase_start_time
@@ -326,7 +318,6 @@ def on_sleep_change(event):
     if callback is not None:
         callback.period = max(100, int(event.new) * 1000)
 
-
 def on_start_change(event):
     global phase, phase_start_time, current_size_index, callback
 
@@ -351,7 +342,6 @@ def on_start_change(event):
         status_text.object = "Status: stopped"
         if callback is not None and callback.running:
             callback.stop()
-
 
 def make_plot(df):
     if df is None or df.empty:
@@ -441,14 +431,11 @@ def make_plot(df):
 
     return pn.pane.Plotly(fig, config={"responsive": True})
 
-
 plot_pane = pn.bind(make_plot, table_pane.param.value)
-
 
 def on_scan_setting_change(event):
     save_settings()
     update_scan_preview()
-
 
 for widget in [
     cpc_com_port,
