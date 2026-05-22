@@ -1,19 +1,12 @@
 import numpy as np
 import scipy.constants as const
 
-def ionRatio(Cpos, Cneg, use_mod=False):
-    if use_mod:
+def ionRatio(Cpos, Cneg, use_mod=False, test = False):
+    if use_mod or test:
         return 1
-
     Cpos = np.asarray(Cpos, dtype=float)
     Cneg = np.asarray(Cneg, dtype=float)
-
-    return np.divide(
-        Cpos,
-        Cneg,
-        out=np.full_like(Cpos, np.nan, dtype=float),
-        where=Cneg > 0,
-    )
+    return np.divide(Cpos, Cneg, out=np.full_like(Cpos, np.inf), where=Cneg != 0)
 
 def alpha(q,dp, use_mod=True):
     if use_mod:
@@ -40,11 +33,10 @@ def gunnWosner(q, dp, Npos, Nneg, T=293.15, use_mod=True, test=False):
         2 * np.pi * const.epsilon_0 * a * dp_m * const.Boltzmann * T
         / const.elementary_charge**2
     )
-    
-    ratio = ionRatio(Npos, Nneg, use_mod=use_mod) * mobilityratio()
-    ratio = np.where(ratio > 0, ratio, np.nan)
 
-    mean = sigma2 * np.log(ratio)
+    mean = sigma2 * np.log(
+        ionRatio(Npos, Nneg, use_mod=use_mod, test=test) * mobilityratio()
+    )
 
     f = 1 / np.sqrt(2 * np.pi * sigma2)
     f *= np.exp(-((q - mean)**2) / (2 * sigma2))

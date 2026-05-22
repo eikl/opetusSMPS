@@ -488,6 +488,7 @@ def make_plot(df):
             
             charge_fraction_modified = ctl.Chargefraction.gunnWosner(1, merged["abs_size_nm"].to_numpy(), merged["cpc_pos"].to_numpy(), merged["cpc_neg"].to_numpy(), use_mod=True)
             charge_fraction_og = ctl.Chargefraction.gunnWosner(1, merged["abs_size_nm"].to_numpy(), merged["cpc_pos"].to_numpy(), merged["cpc_neg"].to_numpy(), use_mod=False)
+            charge_fraction_wiedensohler = ctl.Chargefraction.wiedensohler(1, merged["abs_size_nm"].to_numpy())
             
             fig.add_scatter(
                 x=merged["abs_size_nm"],
@@ -503,6 +504,15 @@ def make_plot(df):
                 y=charge_fraction_og,
                 mode="lines+markers",
                 name=f"Scan {sn}: charge fraction GW",
+                row=5,
+                col=1,
+            )
+            
+            fig.add_scatter(
+                x=merged["abs_size_nm"],
+                y=charge_fraction_wiedensohler,
+                mode="lines+markers",
+                name=f"Scan {sn}: charge fraction Wiedensohler",
                 row=5,
                 col=1,
             )
