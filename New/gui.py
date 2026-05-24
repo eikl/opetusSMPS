@@ -569,7 +569,7 @@ def make_plot(df):
     fig = make_subplots(
         rows=7,
         cols=1,
-        shared_xaxes=True,
+        shared_xaxes=False,
         row_heights=[0.20, 0.80, 0.25, 0.80, 0.8, 0.8, 0.8],
         vertical_spacing=0.05,
     )
@@ -703,6 +703,9 @@ def make_plot(df):
     fig.update_yaxes(title_text="CPC", row=2, col=1)
     fig.update_yaxes(title_text="Sheath", row=3, col=1)
     fig.update_yaxes(title_text="+ / - ratio", row=4, col=1)
+    fig.update_xaxes(title_text="Time", row=3, col=1)
+    fig.update_xaxes(title_text="Time", row=1, col=1)
+    fig.update_xaxes(title_text="Time", row=2, col=1)
     fig.update_xaxes(title_text="Time", row=3, col=1)
 
     fig.update_layout(
