@@ -1,5 +1,5 @@
 import numpy as np
-from .. import constants
+import scipy.constants as sc
 
 
 def gunn_woessner_modified(q, dp, t, Zp, Zn, Mrp, Mrn, Np, Nn, summed):
@@ -11,9 +11,9 @@ def gunn_woessner_modified(q, dp, t, Zp, Zn, Mrp, Mrn, Np, Nn, summed):
     dp : scalar or 1-D array of particle diameters [m]
     Returns a 1-D array of charge fractions, same length as dp.
     """
-    kB = constants.boltz
-    eps_0 = constants.eo
-    e = constants.e
+    kB = sc.Boltzmann
+    eps_0 = sc.epsilon_0
+    e = sc.elementary_charge
 
     dp = np.atleast_1d(np.asarray(dp, dtype=float))
 

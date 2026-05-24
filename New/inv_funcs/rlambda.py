@@ -1,5 +1,6 @@
 import numpy as np
-from .. import constants
+import scipy.constants as sc
+
 
 
 def rlambda(t, press):
@@ -8,6 +9,6 @@ def rlambda(t, press):
     dm = 3.7e-10
     avoc = 6.022e23
     
-    r = constants.kaasuv * t / (np.sqrt(2.0) * avoc * press * np.pi * dm * dm)
+    r = sc.R * t / (np.sqrt(2.0) * avoc * press * np.pi * dm * dm)
     
     return r

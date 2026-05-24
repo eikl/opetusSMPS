@@ -1,5 +1,6 @@
 import numpy as np
-from .. import constants
+import scipy.constants as sc
+
 
 
 # Wiedensohler coefficients indexed by [sign_index, abs_charge-1, polynomial_power]
@@ -53,7 +54,7 @@ def varaus(dp, p, temp):
     if np.any(iil):
         for charge_idx in range(n_wied):
             i_abs = charge_idx + 1  # |p| value
-            coe = (2.0 * np.pi * constants.eo * dp[iil] * constants.boltz * temp) / constants.e ** 2
+            coe = (2.0 * np.pi * sc.epsilon_0 * dp[iil] * sc.Boltzmann * temp) / sc.elementary_charge ** 2
             coeff[iil, charge_idx] = (
                 (1.0 / np.sqrt(coe * 2.0 * np.pi))
                 * np.exp(-(-sign_p * i_abs - coe * 0.1335) ** 2 / (2.0 * coe))
@@ -62,7 +63,7 @@ def varaus(dp, p, temp):
     # Gunn theory for |p| >= 3
     for charge_idx in range(2, n_p):
         i_abs = charge_idx + 1  # |p| value
-        coe = (2.0 * np.pi * constants.eo * dp * constants.boltz * temp) / constants.e ** 2
+        coe = (2.0 * np.pi * sc.epsilon_0 * dp * sc.Boltzmann * temp) / sc.elementary_charge ** 2
         coeff[:, charge_idx] = (
             (1.0 / np.sqrt(coe * 2.0 * np.pi))
             * np.exp(-(-sign_p * i_abs - coe * 0.1335) ** 2 / (2.0 * coe))

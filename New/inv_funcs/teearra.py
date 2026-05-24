@@ -2,7 +2,8 @@ import numpy as np
 from scipy.special import erf
 from .cunn import cunn
 from .visc import visc
-from .. import constants
+import scipy.constants as sc
+
 
 
 def teearra(p, dp, t, press, voltage, pituus, arkaksi, aryksi, qa, qc, qm, qs):
@@ -30,7 +31,7 @@ def teearra(p, dp, t, press, voltage, pituus, arkaksi, aryksi, qa, qc, qm, qs):
               * (gammai + 1.0 / (2 * (1 + beta) * gkappa) ** 2)) / (1 - gammas)
 
     # Mobility of each particle: shape (n_dp,)
-    mob = constants.e * cunn(dp, t, press) / (3 * np.pi * visc(t) * dp)
+    mob = sc.elementary_charge * cunn(dp, t, press) / (3 * np.pi * visc(t) * dp)
 
     # zeta[i, j] = mob[i] * p[j] ; shape (n_dp, n_p)
     zeta = np.outer(mob, p)
@@ -41,7 +42,7 @@ def teearra(p, dp, t, press, voltage, pituus, arkaksi, aryksi, qa, qc, qm, qs):
 
     # Diffusion broadening parameter; shape (n_dp, n_p)
     rhota = np.zeros((len(dp), len(p)))
-    diffusion_factor = gabeta * np.log(aryksi / arkaksi) * constants.boltz * t / (constants.e * voltage)
+    diffusion_factor = gabeta * np.log(aryksi / arkaksi) * sc.Boltzmann * t / (sc.elementary_charge * voltage)
     for i in range(len(p)):
         rhota[:, i] = np.sqrt((zetap[:, i] / p[i]) * diffusion_factor)
 

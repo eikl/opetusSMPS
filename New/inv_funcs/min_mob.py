@@ -1,5 +1,6 @@
 import numpy as np
-from .. import constants
+import scipy.constants as sc
+
 from .cunn import cunn
 from .visc import visc
 
@@ -12,6 +13,6 @@ def min_mob(mob, t, press):
     
     while np.max(np.abs(dp - dpt) / dpt) > 1e-6:
         dp = dpt.copy()
-        dpt = constants.e * cunn(dp, t, press) / (3 * np.pi * visc(t) * mob)
+        dpt = sc.elementary_charge * cunn(dp, t, press) / (3 * np.pi * visc(t) * mob)
     
     return dpt

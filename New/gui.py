@@ -2,12 +2,18 @@ import panel as pn
 import pandas as pd
 import time
 import DmpsControl as ctl
+import inv_funcs as inv
 import numpy as np
 import csv
 import json
 from pathlib import Path
 from datetime import datetime
 from plotly.subplots import make_subplots
+import threading
+import traceback
+from scipy.integrate import quad
+from scipy.optimize import nnls
+from concurrent.futures import ThreadPoolExecutor
 
 SETTINGS_FILE = Path("settings.json")
 
@@ -23,6 +29,12 @@ DEFAULT_SETTINGS = {
     "sleep_time": 5,
 }
 
+inversion_executor = ThreadPoolExecutor(max_workers=1)
+latest_inversion = None
+latest_inversion_signature = None
+inversion_running = False
+inversion_lock = threading.Lock()
+
 # Run with systemd service, or manually:
 # source ./venv/bin/activate
 # python gui.py
@@ -31,7 +43,9 @@ flowmeter = None
 blower = None
 flow_controller = None
 cpc = None
-callback = None
+
+measurement_running = threading.Event()
+measurement_thread = None
 
 pn.extension("plotly")
 
@@ -178,14 +192,35 @@ def save_completed_scan(scan_rows, scan_number):
     print(f"Saved completed scan: {path}", flush=True)
     
 def get_recent_completed_scans(n=None):
+
     if n is None:
         n = int(n_scans_plot.value)
 
-    if not completed_scans:
+    root = Path("logs/scans")
+    if not root.exists():
+        print(f"No scan root found: {root}", flush=True)
         return pd.DataFrame()
 
-    dfs = completed_scans[-n:]
-    return pd.concat(dfs, ignore_index=True)
+    csv_files = sorted(root.glob("*/*.csv"))[-n:]
+
+    dfs = []
+    for f in csv_files:
+        try:
+            dfs.append(pd.read_csv(f))
+        except Exception as e:
+            print(f"Could not read scan file {f}: {e}", flush=True)
+
+    if dfs:
+        return pd.concat(dfs, ignore_index=True)
+
+    return pd.DataFrame()
+
+def load_initial_scans_to_table():
+    df0 = get_recent_completed_scans(int(n_scans_plot.value))
+    if df0 is not None and not df0.empty:
+        table_pane.value = df0.tail(100)
+    else:
+        print("No completed scans found on startup", flush=True)
 
 def get_scan_program():
     scan = []
@@ -207,7 +242,9 @@ def update_scan_preview():
         scan_pane.object = f"Scan parse error: {e}"
 
 def stop_and_zero():
-    global phase, current_size_index, phase_start_time, callback
+    global phase, current_size_index, phase_start_time
+
+    measurement_running.clear()
 
     if start_button.value:
         start_button.value = False
@@ -215,9 +252,6 @@ def stop_and_zero():
     phase = "idle"
     current_size_index = 0
     phase_start_time = time.time()
-
-    if callback is not None and callback.running:
-        callback.stop()
 
     try:
         ctl.HV.zero()
@@ -247,6 +281,18 @@ def init():
     )
     flow_controller.start()
     status_text.object = "Status: hardware initialized"
+
+def measurement_loop():
+    while True:
+        if measurement_running.is_set():
+            measurement_step()
+        time.sleep(float(sleep_time.value))
+
+def ensure_measurement_thread():
+    global measurement_thread
+    if measurement_thread is None or not measurement_thread.is_alive():
+        measurement_thread = threading.Thread(target=measurement_loop, daemon=True)
+        measurement_thread.start()
 
 def measurement_step(debug=True):
     global current_size_index, phase, phase_start_time, scan_number
@@ -304,18 +350,26 @@ def measurement_step(debug=True):
 
             rows.append(row)
             scan_rows.append(row)
-            last_row_pane.object = str(row)
+
             log_row(row, local_log=local_log, cloud_log=None)
-            
-            
+
+            doc = pn.state.curdoc
+
+            if doc is not None:
+                doc.add_next_tick_callback(
+                    lambda row=row: setattr(last_row_pane, "object", str(row))
+                )
+            else:
+                last_row_pane.object = str(row)
+                        
 
             if now - phase_start_time >= meas_sec:
                 phase_start_time = now
                 current_size_index += 1
                 if current_size_index >= len(scan):
                     current_size_index = 0
-      
-                    current_size_index = 0
+    
+                    
                     scan_number += 1
 
                     save_completed_scan(scan_rows, scan_number)
@@ -325,9 +379,19 @@ def measurement_step(debug=True):
                     ctl.HV.zero()
 
         if rows:
-            table_pane.value = pd.DataFrame(rows[-100:])
+            latest_df = pd.DataFrame(rows[-100:])
+
+            doc = pn.state.curdoc
+
+            if doc is not None:
+                doc.add_next_tick_callback(
+                    lambda df=latest_df: setattr(table_pane, "value", df)
+                )
+            else:
+                table_pane.value = latest_df
 
     except Exception as e:
+        traceback.print_exc()
         status_text.object = f"Measurement error: {e}"
         print(f"Measurement error: {e}", flush=True)
 
@@ -353,39 +417,149 @@ def log_row(row, local_log, cloud_log=None):
             status_text.object = f"Cloud log failed, local OK: {e}"
 
 
-def on_sleep_change(event):
-    global callback
-    if callback is not None:
-        callback.period = max(100, int(event.new) * 1000)
 
 def on_start_change(event):
-    global phase, phase_start_time, current_size_index, callback
+    global phase, phase_start_time, current_size_index
 
     if event.new:
         init()
-        update_scan_preview()
+        ensure_measurement_thread()
 
-        status_text.object = "Status: running"
         phase = "idle"
         phase_start_time = time.time()
         current_size_index = 0
 
-        if callback is None or not callback.running:
-            callback = pn.state.add_periodic_callback(
-                measurement_step,
-                period=int(sleep_time.value) * 1000,
-                start=True,
-            )
-        else:
-            callback.start()
+        measurement_running.set()
+        status_text.object = "Status: running"
+
     else:
+        measurement_running.clear()
         status_text.object = "Status: stopped"
-        if callback is not None and callback.running:
-            callback.stop()
+
+def invert_one_scan(d, polarity, scan_range, temp=293.15, press=101325):
+    d = d.copy()
+    d["cpc_float"] = pd.to_numeric(d["cpc_count"], errors="coerce")
+    d["abs_size_nm"] = d["size_nm"].abs()
+    d = d.sort_values("abs_size_nm")
+
+    y = d.groupby("abs_size_nm")["cpc_float"].mean()
+    dp_meas_nm = y.index.to_numpy(dtype=float)
+    y = y.to_numpy(dtype=float)
+
+    dp_grid_nm = dp_meas_nm.copy()
+    dp_grid_m = dp_grid_nm * 1e-9
+    ldp = np.log10(dp_grid_m)
+
+    limits = np.empty(len(ldp) + 1)
+    limits[0] = ldp[0] - (ldp[1] - ldp[0]) / 2
+    limits[1:-1] = 0.5 * (ldp[1:] + ldp[:-1])
+    limits[-1] = ldp[-1] + (ldp[-1] - ldp[-2]) / 2
+
+    dma = ctl.HaukeDMA()
+    A = np.zeros((len(dp_meas_nm), len(dp_grid_nm)))
+
+    qa = 1.0 / 60000.0
+    qs = 1.0 / 60000.0
+    q_sheath = float(d["sheath_setpoint"].median())
+    qc = q_sheath / 60000.0
+    qm = qc + qa - qs
+
+    # match old sign convention:
+    # pol=+1 uses negative charges, pol=-1 uses positive charges
+    if polarity == "positive":
+        p = np.arange(-1, -6, -1, dtype=float)
+    else:
+        p = np.arange(1, 6, 1, dtype=float)
+
+    for i, dp_nm in enumerate(dp_meas_nm):
+        voltage = ctl.HV.voltage_from_size(
+            dp_nm if polarity == "positive" else -dp_nm,
+            Q_sh_lpm=q_sheath,
+        )
+
+        args = (
+            temp, press, p, voltage,
+            dma.L, dma.r2, dma.r1,
+            qa, qc, qm, qs,
+            1.0, qa, 1,
+            1.35e-4, 1.60e-4,
+            140, 101,
+            1e13, 1e13,
+            "gunn woessner mod",
+            0,
+        )
+
+        for j in range(len(dp_grid_nm)):
+            a = limits[j]
+            b = limits[j + 1]
+            val, _ = quad(inv.intfun, a, b, args=args, limit=50)
+            A[i, j] = val / (b - a)
+
+    x, rnorm = nnls(A, y)
+
+    return pd.DataFrame({
+        "abs_size_nm": dp_grid_nm,
+        "N_inverted": x,
+    })
+
+'''def corrected_scan_df(df, temp=293.15, press=101325):
+    df = df.copy()
+    df["cpc_float"] = pd.to_numeric(df["cpc_count"], errors="coerce")
+    df["abs_size_nm"] = df["size_nm"].abs()
+    df["dp_m"] = df["abs_size_nm"] * 1e-9
+    df["polarity"] = np.where(df["size_nm"] > 0, "positive", "negative")
+
+    response = np.zeros(len(df))
+    dma = ctl.HaukeDMA()
+
+    for i, row in df.iterrows():
+        voltage = ctl.HV.voltage_from_size(
+            row["size_nm"],
+            Q_sh_lpm=row["sheath_setpoint"],
+        )
+
+        p = np.array([1]) if row["size_nm"] > 0 else np.array([-1])
+
+        qa = 1.0 / 60000.0
+        qs = 1.0 / 60000.0
+        qc = row["sheath_setpoint"] / 60000.0
+        qm = qc + qa - qs
+
+        dp0 = row["dp_m"]
+
+        a = np.log10(dp0 / 1.05)
+        b = np.log10(dp0 * 1.05)
+
+        args = (
+            temp, press, p, voltage,
+            dma.L, dma.r2, dma.r1,
+            qa, qc, qm, qs,
+            1.0, qa, 1,
+            1.35e-4, 1.60e-4,
+            140, 101,
+            1e13, 1e13,
+            "gunn woessner mod",
+            0,
+        )
+
+        val, err = quad(inv.intfun, a, b, args=args, limit=50)
+        response[i] = val / (b - a)
+
+    df["kernel_response"] = response
+    df["N_corrected"] = df["cpc_float"] / response
+
+    return df'''
 
 def make_plot(df):
-    if df is None or df.empty:
+    df2 = get_recent_completed_scans(int(n_scans_plot.value))
+
+    if (df is None or df.empty) and (df2 is None or df2.empty):
         return pn.pane.Markdown("No data")
+
+    if df is None or df.empty:
+        df = pd.DataFrame(columns=["time", "size_nm", "cpc_count", "sheath_setpoint", "sheath_flow"])
+    else:
+        df = df.copy()
 
     df = df.copy()
     df["cpc_float"] = pd.to_numeric(df["cpc_count"], errors="coerce")
@@ -393,10 +567,10 @@ def make_plot(df):
     hover_strings = df["size_nm"].astype(str).to_list()
 
     fig = make_subplots(
-        rows=5,
+        rows=7,
         cols=1,
         shared_xaxes=True,
-        row_heights=[0.20, 0.80, 0.25, 0.80, 0.8],
+        row_heights=[0.20, 0.80, 0.25, 0.80, 0.8, 0.8, 0.8],
         vertical_spacing=0.05,
     )
 
@@ -444,7 +618,9 @@ def make_plot(df):
         col=1,
     )
 
-    df2 = get_recent_completed_scans(int(n_scans_plot.value))
+    if df2 is not None and not df2.empty:
+        start_inversion_job(df2)
+        add_cached_heatmaps(fig)
 
     if df2 is not None and not df2.empty:
         df2 = df2.copy()
@@ -476,6 +652,8 @@ def make_plot(df):
                 merged["cpc_pos"].to_numpy(),
                 merged["cpc_neg"].to_numpy(),
             )
+
+            ratio = np.clip(ratio, 0, 4)
 
             fig.add_scatter(
                 x=merged["abs_size_nm"],
@@ -529,15 +707,229 @@ def make_plot(df):
 
     fig.update_layout(
         title="Live DMPS scan",
-        margin=dict(l=20, r=20, t=40, b=20),
-        height=700,
+        margin=dict(l=20, r=260, t=40, b=20),
+        height=900,
         width=1500,
         showlegend=True,
+        legend=dict(x=1.18, y=1.0),
+        autosize=False,
+        uirevision="dmps",
     )
 
-    return pn.pane.Plotly(fig, config={"responsive": True})
+    return pn.pane.Plotly(
+        fig,
+        config={"responsive": False},
+        height=900,
+        width=1500,
+        sizing_mode="fixed",
+    )
+
+
+
+
+def _scan_signature(df2):
+    if df2 is None or df2.empty:
+        return None
+
+    tmax = str(pd.to_datetime(df2["time"], errors="coerce").max())
+    scan_numbers = tuple(sorted(pd.to_numeric(df2["scan_number"], errors="coerce").dropna().astype(int).unique()))
+    nrows = int(len(df2))
+    nplot = int(n_scans_plot.value)
+
+    return (nrows, scan_numbers, tmax, nplot)
+
+
+def _size_axis_for_range(scan_range):
+    sizes = sorted(
+        set(
+            abs(x["dp"])
+            for x in get_scan_program()
+            if int(x["scan_range"]) == int(scan_range)
+        )
+    )
+    return np.asarray(sizes, dtype=float)
+
+
+def compute_inversion_heatmap(df2):
+    """Slow worker-thread calculation. Does not touch Panel/Bokeh objects."""
+    df2 = df2.copy()
+    df2["abs_size_nm"] = df2["size_nm"].abs()
+    df2["polarity"] = np.where(df2["size_nm"] > 0, "positive", "negative")
+    df2["time"] = pd.to_datetime(df2["time"], errors="coerce")
+
+    traces = []
+
+    for polarity, row in [("positive", 6), ("negative", 7)]:
+        for scan_range in sorted(df2["scan_range"].dropna().unique()):
+            size_axis = _size_axis_for_range(scan_range)
+
+            if len(size_axis) < 2:
+                continue
+
+            dd = df2[
+                (df2["polarity"] == polarity)
+                & (df2["scan_range"] == scan_range)
+            ].copy()
+
+            if dd.empty:
+                continue
+
+            heat_cols = []
+            heat_times = []
+
+            for sn, g in dd.groupby("scan_number"):
+                if g.empty:
+                    continue
+
+                invdf = invert_one_scan(g, polarity, scan_range)
+
+                dp_inv = invdf["abs_size_nm"].to_numpy(dtype=float)
+                n_inv = invdf["N_inverted"].to_numpy(dtype=float)
+
+                order = np.argsort(dp_inv)
+                dp_inv = dp_inv[order]
+                n_inv = n_inv[order]
+
+                x_interp = np.interp(
+                    np.log10(size_axis),
+                    np.log10(dp_inv),
+                    n_inv,
+                    left=np.nan,
+                    right=np.nan,
+                )
+
+                heat_cols.append(x_interp)
+                heat_times.append(g["time"].median())
+
+            if not heat_cols:
+                continue
+
+            Z = np.column_stack(heat_cols)
+
+            traces.append(
+                {
+                    "polarity": polarity,
+                    "scan_range": int(scan_range),
+                    "row": row,
+                    "Z": Z,
+                    "x": heat_times,
+                    "y": size_axis,
+                    "name": f"{polarity} inverted R{int(scan_range)}",
+                }
+            )
+
+    return traces
+
+
+def start_inversion_job(df2):
+    """Start one background inversion job if needed."""
+    global inversion_running, latest_inversion_signature
+
+    signature = _scan_signature(df2)
+
+    with inversion_lock:
+        if inversion_running:
+            return
+        if signature is not None and signature == latest_inversion_signature:
+            return
+
+        inversion_running = True
+
+    print("Starting background inversion", flush=True)
+
+    fut = inversion_executor.submit(compute_inversion_heatmap, df2.copy())
+
+    def done_callback(fut):
+        global latest_inversion, latest_inversion_signature, inversion_running
+
+        try:
+            result = fut.result()
+            with inversion_lock:
+                latest_inversion = result
+                latest_inversion_signature = signature
+                inversion_running = False
+            print(f"Background inversion finished: {len(result)} heatmaps", flush=True)
+
+        except Exception:
+            traceback.print_exc()
+            with inversion_lock:
+                inversion_running = False
+
+    fut.add_done_callback(done_callback)
+
+
+def add_cached_heatmaps(fig):
+    """Fast UI function. Only draws cached inversion output."""
+    with inversion_lock:
+        cached = latest_inversion
+
+    if not cached:
+        return
+
+    for tr in cached:
+
+        Z = np.clip(tr["Z"], 0, 20000)
+
+        fig.add_heatmap(
+            z=Z,
+            x=tr["x"],
+            y=tr["y"],
+            zmin=0,
+            zmax=20000,
+            colorbar=dict(
+                title=f'{tr["polarity"]} R{tr["scan_range"]}',
+                x=1.02 if tr["polarity"] == "positive" else 1.09,
+                len=0.28,
+                y=0.22 if tr["polarity"] == "positive" else 0.08,
+            ),
+            name=tr["name"],
+            row=tr["row"],
+            col=1,
+        )
+
+        fig.update_yaxes(
+            type="log",
+            title_text="dp (nm)",
+            row=tr["row"],
+            col=1,
+        )
+
+        fig.update_xaxes(
+            title_text="Time",
+            tickformat="%H:%M",
+            row=tr["row"],
+            col=1,
+        )
+
 
 plot_pane = pn.bind(make_plot, table_pane.param.value)
+
+plot_box = pn.Column(
+    plot_pane,
+    height=950,
+    width=1550,
+    sizing_mode="fixed",
+    scroll=False,
+)
+
+def startup_load():
+    df0 = get_recent_completed_scans(int(n_scans_plot.value))
+
+    if df0 is not None and not df0.empty:
+        print(f"Startup loaded {len(df0)} rows", flush=True)
+
+        table_pane.value = df0.tail(100)
+
+        # also populate memory cache
+        completed_scans.clear()
+
+        for sn, g in df0.groupby("scan_number"):
+            completed_scans.append(g.copy())
+
+    else:
+        print("No startup scans found", flush=True)
+
+pn.state.onload(startup_load)
 
 def on_scan_setting_change(event):
     save_settings()
@@ -556,7 +948,6 @@ for widget in [
 ]:
     widget.param.watch(on_scan_setting_change, "value")
 
-sleep_time.param.watch(on_sleep_change, "value")
 start_button.param.watch(on_start_change, "value")
 init_button.on_click(lambda event: init())
 stop_button.on_click(lambda event: stop_and_zero())
@@ -565,6 +956,7 @@ update_scan_preview()
 
 #### Layout ####
 layout = pn.Column(
+    
     "# DMA / CPC Control GUI",
     pn.Row(cpc_com_port),
     "# CPC / DMA control panel",
@@ -579,10 +971,13 @@ layout = pn.Column(
     last_row_pane,
     table_pane,
     "### Live plot",
-    plot_pane,
+    plot_box,
+    sizing_mode="fixed",
+    width=1600,
 )
 
 layout.servable()
+
 
 # To host via Tailscale. Update websocket_origin IPs if your Tailscale IPs change.
 pn.serve(

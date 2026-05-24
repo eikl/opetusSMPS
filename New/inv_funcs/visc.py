@@ -1,5 +1,6 @@
 import numpy as np
-from .. import constants
+import scipy.constants as sc
+
 
 
 def visc(t):
