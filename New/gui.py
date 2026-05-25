@@ -763,27 +763,18 @@ def compute_inversion_heatmap(df2):
     traces = []
 
     for polarity, row in [("positive", 6), ("negative", 7)]:
-        for scan_range in sorted(df2["scan_range"].dropna().unique()):
-            size_axis = _size_axis_for_range(scan_range)
+        size_axis = sorted(set(abs(x["dp"]) for x in get_scan_program()))
+        size_axis = np.asarray(size_axis, dtype=float)
 
-            if len(size_axis) < 2:
-                continue
+        dd_pol = df2[df2["polarity"] == polarity].copy()
 
-            dd = df2[
-                (df2["polarity"] == polarity)
-                & (df2["scan_range"] == scan_range)
-            ].copy()
+        heat_cols = []
+        heat_times = []
 
-            if dd.empty:
-                continue
+        for sn, g_scan in dd_pol.groupby("scan_number"):
+            scan_parts = []
 
-            heat_cols = []
-            heat_times = []
-
-            for sn, g in dd.groupby("scan_number"):
-                if g.empty:
-                    continue
-
+            for scan_range, g in g_scan.groupby("scan_range"):
                 invdf = invert_one_scan(g, polarity, scan_range)
 
                 dp_inv = invdf["abs_size_nm"].to_numpy(dtype=float)
@@ -793,33 +784,41 @@ def compute_inversion_heatmap(df2):
                 dp_inv = dp_inv[order]
                 n_inv = n_inv[order]
 
-                x_interp = np.interp(
-                    np.log10(size_axis),
-                    np.log10(dp_inv),
-                    n_inv,
-                    left=np.nan,
-                    right=np.nan,
-                )
+                scan_parts.append((dp_inv, n_inv))
 
-                heat_cols.append(x_interp)
-                heat_times.append(g["time"].median())
-
-            if not heat_cols:
+            if not scan_parts:
                 continue
 
-            Z = np.column_stack(heat_cols)
+            full_col = np.full(len(size_axis), np.nan)
 
-            traces.append(
-                {
-                    "polarity": polarity,
-                    "scan_range": int(scan_range),
-                    "row": row,
-                    "Z": Z,
-                    "x": heat_times,
-                    "y": size_axis,
-                    "name": f"{polarity} inverted R{int(scan_range)}",
-                }
-            )
+            for dp_inv, n_inv in scan_parts:
+                mask = (size_axis >= np.nanmin(dp_inv)) & (size_axis <= np.nanmax(dp_inv))
+
+                full_col[mask] = np.interp(
+                    np.log10(size_axis[mask]),
+                    np.log10(dp_inv),
+                    n_inv,
+                )
+
+            heat_cols.append(full_col)
+            heat_times.append(g_scan["time"].median())
+
+        if not heat_cols:
+            continue
+
+        Z = np.column_stack(heat_cols)
+
+        traces.append(
+            {
+                "polarity": polarity,
+                "scan_range": "all",
+                "row": row,
+                "Z": Z,
+                "x": heat_times,
+                "y": size_axis,
+                "name": f"{polarity} inverted",
+            }
+        )
 
     return traces
 
