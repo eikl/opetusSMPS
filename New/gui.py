@@ -27,6 +27,7 @@ DEFAULT_SETTINGS = {
     "range2_steps": 20,
     "meas_time": 15,
     "sleep_time": 5,
+    "n_scans_plot": 5,
 }
 
 inversion_executor = ThreadPoolExecutor(max_workers=1)
@@ -55,6 +56,8 @@ cpc_com_port = pn.widgets.TextInput(name="CPC COM port", value="/dev/ttyAMA0")
 start_button = pn.widgets.Toggle(name="Start measurement", button_type="success")
 init_button = pn.widgets.Button(name="Initialize hardware", button_type="primary")
 stop_button = pn.widgets.Button(name="Stop and zero HV", button_type="danger")
+
+
 
 n_scans_plot = pn.widgets.IntInput(name="Number of completed scans to plot",value=3,step=1)
 
@@ -125,6 +128,7 @@ def save_settings():
         "range2_steps": int(steps2.value),
         "meas_time": int(meas_time.value),
         "sleep_time": int(sleep_time.value),
+        "n_scans_plot": int(n_scans_plot.value),
     }
 
     with open(SETTINGS_FILE, "w") as f:
@@ -155,6 +159,7 @@ def load_settings():
 
     meas_time.value = settings.get("meas_time", DEFAULT_SETTINGS["meas_time"])
     sleep_time.value = settings.get("sleep_time", DEFAULT_SETTINGS["sleep_time"])
+    n_scans_plot.value = settings.get("n_scans_plot", DEFAULT_SETTINGS["n_scans_plot"])
 
 ensure_settings_file()
 load_settings()
@@ -182,9 +187,10 @@ def save_completed_scan(scan_rows, scan_number):
     if not scan_rows:
         return
 
-    run_day = datetime.now().strftime("%Y%m%d")
-    scan_id = f"{run_day}_scan_{scan_number:04d}"
+    t0 = pd.to_datetime(scan_rows[0]["time"])
+    scan_id = t0.strftime("%Y%m%d_%H%M%S")
 
+    run_day = t0.strftime("%Y%m%d")
     path = Path("logs/scans") / run_day / f"{scan_id}.csv"
     path.parent.mkdir(parents=True, exist_ok=True)
 
@@ -201,7 +207,10 @@ def get_recent_completed_scans(n=None):
         print(f"No scan root found: {root}", flush=True)
         return pd.DataFrame()
 
-    csv_files = sorted(root.glob("*/*.csv"))[-n:]
+    csv_files = sorted(
+    root.glob("*/*.csv"),
+    key=lambda p: p.stem,
+    )[-n:]
 
     dfs = []
     for f in csv_files:
@@ -297,7 +306,7 @@ def ensure_measurement_thread():
         measurement_thread.start()
 
 def measurement_step(debug=True):
-    global current_size_index, phase, phase_start_time, scan_number
+    global current_size_index, phase, phase_start_time, scan_number, latest_inversion_signature
 
     if not start_button.value:
         return
@@ -375,6 +384,10 @@ def measurement_step(debug=True):
                     scan_number += 1
 
                     save_completed_scan(scan_rows, scan_number)
+                    with inversion_lock:
+                        latest_inversion_signature = None
+                    df2 = get_recent_completed_scans(int(n_scans_plot.value))
+                    start_inversion_job(df2)
                     completed_scans.append(pd.DataFrame(scan_rows.copy()))
 
                     scan_rows.clear()
@@ -479,12 +492,12 @@ def invert_one_scan(d, polarity, scan_range, zratio = None, temp=293.15, press=1
             Q_sh_lpm=q_sheath,
         )
         
-        #if zratio is None or not np.isfinite(zratio):
-        zratio = 1.35e-4 / 1.60e-4
+        if zratio is None or not np.isfinite(zratio):
+            zratio = 1.35e-4 / 1.60e-4
 
         
-        Zn = 1e-4
-        Zp = zratio * Zn
+        Zp = 1e-4
+        Zn = zratio * Zp
         
         args = (
             temp, press, p, voltage,
@@ -1023,6 +1036,7 @@ for widget in [
     steps2,
     meas_time,
     sleep_time,
+    n_scans_plot,
 ]:
     widget.param.watch(on_scan_setting_change, "value")
 
