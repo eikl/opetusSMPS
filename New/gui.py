@@ -502,53 +502,6 @@ def invert_one_scan(d, polarity, scan_range, temp=293.15, press=101325):
         "N_inverted": x,
     })
 
-'''def corrected_scan_df(df, temp=293.15, press=101325):
-    df = df.copy()
-    df["cpc_float"] = pd.to_numeric(df["cpc_count"], errors="coerce")
-    df["abs_size_nm"] = df["size_nm"].abs()
-    df["dp_m"] = df["abs_size_nm"] * 1e-9
-    df["polarity"] = np.where(df["size_nm"] > 0, "positive", "negative")
-
-    response = np.zeros(len(df))
-    dma = ctl.HaukeDMA()
-
-    for i, row in df.iterrows():
-        voltage = ctl.HV.voltage_from_size(
-            row["size_nm"],
-            Q_sh_lpm=row["sheath_setpoint"],
-        )
-
-        p = np.array([1]) if row["size_nm"] > 0 else np.array([-1])
-
-        qa = 1.0 / 60000.0
-        qs = 1.0 / 60000.0
-        qc = row["sheath_setpoint"] / 60000.0
-        qm = qc + qa - qs
-
-        dp0 = row["dp_m"]
-
-        a = np.log10(dp0 / 1.05)
-        b = np.log10(dp0 * 1.05)
-
-        args = (
-            temp, press, p, voltage,
-            dma.L, dma.r2, dma.r1,
-            qa, qc, qm, qs,
-            1.0, qa, 1,
-            1.35e-4, 1.60e-4,
-            140, 101,
-            1e13, 1e13,
-            "gunn woessner mod",
-            0,
-        )
-
-        val, err = quad(inv.intfun, a, b, args=args, limit=50)
-        response[i] = val / (b - a)
-
-    df["kernel_response"] = response
-    df["N_corrected"] = df["cpc_float"] / response
-
-    return df'''
 
 def make_plot(df):
     df2 = get_recent_completed_scans(int(n_scans_plot.value))
