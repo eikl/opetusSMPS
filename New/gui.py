@@ -520,10 +520,10 @@ def make_plot(df):
     hover_strings = df["size_nm"].astype(str).to_list()
 
     fig = make_subplots(
-        rows=7,
+        rows=8,
         cols=1,
         shared_xaxes=False,
-        row_heights=[0.20, 0.80, 0.25, 0.80, 0.8, 0.8, 0.8],
+        row_heights=[0.20, 0.80, 0.25, 0.80, 0.8, 0.8, 0.8, 0.8],
         vertical_spacing=0.05,
     )
 
@@ -707,25 +707,27 @@ def _size_axis_for_range(scan_range):
 
 
 def compute_inversion_heatmap(df2):
-    """Slow worker-thread calculation. Does not touch Panel/Bokeh objects."""
     df2 = df2.copy()
     df2["abs_size_nm"] = df2["size_nm"].abs()
     df2["polarity"] = np.where(df2["size_nm"] > 0, "positive", "negative")
     df2["time"] = pd.to_datetime(df2["time"], errors="coerce")
 
     traces = []
+    ntot_traces = []
+
+    size_axis = sorted(set(abs(x["dp"]) for x in get_scan_program()))
+    size_axis = np.asarray(size_axis, dtype=float)
 
     for polarity, row in [("positive", 6), ("negative", 7)]:
-        size_axis = sorted(set(abs(x["dp"]) for x in get_scan_program()))
-        size_axis = np.asarray(size_axis, dtype=float)
-
         dd_pol = df2[df2["polarity"] == polarity].copy()
 
         heat_cols = []
         heat_times = []
+        ntot_vals = []
 
-        for sn, g_scan in dd_pol.groupby("scan_number"):
+        for sn, g_scan in dd_pol.groupby("scan_id" if "scan_id" in dd_pol.columns else "scan_number"):
             scan_parts = []
+            ntot_scan = 0.0
 
             for scan_range, g in g_scan.groupby("scan_range"):
                 invdf = invert_one_scan(g, polarity, scan_range)
@@ -733,20 +735,15 @@ def compute_inversion_heatmap(df2):
                 dp_inv = invdf["abs_size_nm"].to_numpy(dtype=float)
                 n_inv = invdf["N_inverted"].to_numpy(dtype=float)
 
+                ntot_scan += np.nansum(n_inv)
+
                 order = np.argsort(dp_inv)
-                dp_inv = dp_inv[order]
-                n_inv = n_inv[order]
-
-                scan_parts.append((dp_inv, n_inv))
-
-            if not scan_parts:
-                continue
+                scan_parts.append((dp_inv[order], n_inv[order]))
 
             full_col = np.full(len(size_axis), np.nan)
 
             for dp_inv, n_inv in scan_parts:
                 mask = (size_axis >= np.nanmin(dp_inv)) & (size_axis <= np.nanmax(dp_inv))
-
                 full_col[mask] = np.interp(
                     np.log10(size_axis[mask]),
                     np.log10(dp_inv),
@@ -755,25 +752,32 @@ def compute_inversion_heatmap(df2):
 
             heat_cols.append(full_col)
             heat_times.append(g_scan["time"].median())
+            ntot_vals.append(ntot_scan)
 
         if not heat_cols:
             continue
 
-        Z = np.column_stack(heat_cols)
+        traces.append({
+            "kind": "heatmap",
+            "polarity": polarity,
+            "scan_range": "all",
+            "row": row,
+            "Z": np.column_stack(heat_cols),
+            "x": heat_times,
+            "y": size_axis,
+            "name": f"{polarity} inverted",
+        })
 
-        traces.append(
-            {
-                "polarity": polarity,
-                "scan_range": "all",
-                "row": row,
-                "Z": Z,
-                "x": heat_times,
-                "y": size_axis,
-                "name": f"{polarity} inverted",
-            }
-        )
+        ntot_traces.append({
+            "kind": "ntot",
+            "polarity": polarity,
+            "row": 8,
+            "x": heat_times,
+            "y": ntot_vals,
+            "name": f"Ntot {polarity}",
+        })
 
-    return traces
+    return traces + ntot_traces
 
 
 def start_inversion_job(df2):
@@ -793,7 +797,7 @@ def start_inversion_job(df2):
     print("Starting background inversion", flush=True)
 
     fut = inversion_executor.submit(compute_inversion_heatmap, df2.copy())
-
+    
     def done_callback(fut):
         global latest_inversion, latest_inversion_signature, inversion_running
 
@@ -814,7 +818,6 @@ def start_inversion_job(df2):
 
 
 def add_cached_heatmaps(fig):
-    """Fast UI function. Only draws cached inversion output."""
     with inversion_lock:
         cached = latest_inversion
 
@@ -822,39 +825,36 @@ def add_cached_heatmaps(fig):
         return
 
     for tr in cached:
+        if tr["kind"] == "heatmap":
+            Z = np.clip(tr["Z"], 0, 20000)
 
-        Z = np.clip(tr["Z"], 0, 20000)
+            fig.add_heatmap(
+                z=Z,
+                x=tr["x"],
+                y=tr["y"],
+                zmin=0,
+                zmax=20000,
+                colorbar=dict(title=f'{tr["polarity"]}'),
+                name=tr["name"],
+                row=tr["row"],
+                col=1,
+            )
 
-        fig.add_heatmap(
-            z=Z,
-            x=tr["x"],
-            y=tr["y"],
-            zmin=0,
-            zmax=20000,
-            colorbar=dict(
-                title=f'{tr["polarity"]} R{tr["scan_range"]}',
-                x=1.02 if tr["polarity"] == "positive" else 1.09,
-                len=0.28,
-                y=0.22 if tr["polarity"] == "positive" else 0.08,
-            ),
-            name=tr["name"],
-            row=tr["row"],
-            col=1,
-        )
+            fig.update_yaxes(type="log", title_text="dp (nm)", row=tr["row"], col=1)
+            fig.update_xaxes(title_text="Time", tickformat="%H:%M", row=tr["row"], col=1)
 
-        fig.update_yaxes(
-            type="log",
-            title_text="dp (nm)",
-            row=tr["row"],
-            col=1,
-        )
+        elif tr["kind"] == "ntot":
+            fig.add_scatter(
+                x=tr["x"],
+                y=tr["y"],
+                mode="lines+markers",
+                name=tr["name"],
+                row=8,
+                col=1,
+            )
 
-        fig.update_xaxes(
-            title_text="Time",
-            tickformat="%H:%M",
-            row=tr["row"],
-            col=1,
-        )
+            fig.update_yaxes(title_text="Ntot", row=8, col=1)
+            fig.update_xaxes(title_text="Time", tickformat="%H:%M", row=8, col=1)
 
 
 plot_pane = pn.bind(make_plot, table_pane.param.value)
