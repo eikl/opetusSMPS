@@ -11,7 +11,7 @@ from datetime import datetime
 from plotly.subplots import make_subplots
 import threading
 import traceback
-from scipy.integrate import quad
+from scipy.integrate import quad, trapezoid
 from scipy.optimize import nnls
 from concurrent.futures import ThreadPoolExecutor
 
@@ -206,7 +206,9 @@ def get_recent_completed_scans(n=None):
     dfs = []
     for f in csv_files:
         try:
-            dfs.append(pd.read_csv(f))
+            d = pd.read_csv(f)
+            d["scan_id"] = f.stem
+            dfs.append(d)
         except Exception as e:
             print(f"Could not read scan file {f}: {e}", flush=True)
 
@@ -436,7 +438,7 @@ def on_start_change(event):
         measurement_running.clear()
         status_text.object = "Status: stopped"
 
-def invert_one_scan(d, polarity, scan_range, temp=293.15, press=101325):
+def invert_one_scan(d, polarity, scan_range, zratio = None, temp=293.15, press=101325):
     d = d.copy()
     d["cpc_float"] = pd.to_numeric(d["cpc_count"], errors="coerce")
     d["abs_size_nm"] = d["size_nm"].abs()
@@ -476,13 +478,20 @@ def invert_one_scan(d, polarity, scan_range, temp=293.15, press=101325):
             dp_nm if polarity == "positive" else -dp_nm,
             Q_sh_lpm=q_sheath,
         )
+        
+        #if zratio is None or not np.isfinite(zratio):
+        zratio = 1.35e-4 / 1.60e-4
 
+        
+        Zn = 1e-4
+        Zp = zratio * Zn
+        
         args = (
             temp, press, p, voltage,
             dma.L, dma.r2, dma.r1,
             qa, qc, qm, qs,
             1.0, qa, 1,
-            1.35e-4, 1.60e-4,
+            Zp, Zn,
             140, 101,
             1e13, 1e13,
             "gunn woessner mod",
@@ -520,10 +529,10 @@ def make_plot(df):
     hover_strings = df["size_nm"].astype(str).to_list()
 
     fig = make_subplots(
-        rows=8,
+        rows=9,
         cols=1,
         shared_xaxes=False,
-        row_heights=[0.20, 0.80, 0.25, 0.80, 0.8, 0.8, 0.8, 0.8],
+        row_heights=[0.20, 0.80, 0.25, 0.80, 0.8, 0.8, 0.8, 0.45, 0.8],
         vertical_spacing=0.05,
     )
 
@@ -664,7 +673,7 @@ def make_plot(df):
     fig.update_layout(
         title="Live DMPS scan",
         margin=dict(l=20, r=260, t=40, b=20),
-        height=900,
+        height=1100,
         width=1500,
         showlegend=True,
         legend=dict(x=1.18, y=1.0),
@@ -675,7 +684,7 @@ def make_plot(df):
     return pn.pane.Plotly(
         fig,
         config={"responsive": False},
-        height=900,
+        height=1100,
         width=1500,
         sizing_mode="fixed",
     )
@@ -688,12 +697,11 @@ def _scan_signature(df2):
         return None
 
     tmax = str(pd.to_datetime(df2["time"], errors="coerce").max())
-    scan_numbers = tuple(sorted(pd.to_numeric(df2["scan_number"], errors="coerce").dropna().astype(int).unique()))
+    scan_ids = tuple(sorted(df2["scan_id"].dropna().astype(str).unique()))
     nrows = int(len(df2))
     nplot = int(n_scans_plot.value)
 
-    return (nrows, scan_numbers, tmax, nplot)
-
+    return (nrows, scan_ids, tmax, nplot)
 
 def _size_axis_for_range(scan_range):
     sizes = sorted(
@@ -706,6 +714,75 @@ def _size_axis_for_range(scan_range):
     return np.asarray(sizes, dtype=float)
 
 
+def estimate_ion_mobility_ratio_for_scan(g_scan, temp=293.15, press=101325):
+    d = g_scan.copy()
+    d["cpc_float"] = pd.to_numeric(d["cpc_count"], errors="coerce")
+    d["abs_size_nm"] = d["size_nm"].abs()
+    d["polarity"] = np.where(d["size_nm"] > 0, "pos", "neg")
+
+    grouped = (
+        d.groupby(["abs_size_nm", "polarity"])["cpc_float"]
+        .mean()
+        .reset_index()
+    )
+
+    pos = grouped[grouped["polarity"] == "pos"].rename(columns={"cpc_float": "R_pos"})
+    neg = grouped[grouped["polarity"] == "neg"].rename(columns={"cpc_float": "R_neg"})
+
+    m = pd.merge(
+        pos[["abs_size_nm", "R_pos"]],
+        neg[["abs_size_nm", "R_neg"]],
+        on="abs_size_nm",
+        how="inner",
+    ).sort_values("abs_size_nm")
+
+    if len(m) < 3:
+        return np.nan, np.nan
+
+    dp = m["abs_size_nm"].to_numpy(dtype=float)
+    Rp = m["R_pos"].to_numpy(dtype=float)
+    Rn = m["R_neg"].to_numpy(dtype=float)
+
+    # start from largest-size peak
+    start = np.argmax(Rp + Rn)
+
+    for i in range(start, len(dp)):
+        if Rp[i] <= 0 or Rn[i] <= 0:
+            continue
+
+        dp_i_m = dp[i] * 1e-9
+
+        # singly charged mobility at dp_i
+        mob_i = (
+            1.602176634e-19
+            * ctl.HV.cunningham_correction(dp_i_m, T=temp, P=press)
+            / (3 * np.pi * 1.81e-5 * dp_i_m)
+        )
+
+        # doubly charged contaminant: same mobility => particle mobility is half
+        dp_g_m = inv.min_mob(np.array([0.5 * mob_i]), temp, press)[0]
+        dp_g_nm = dp_g_m * 1e9
+
+        if dp_g_nm > np.nanmax(dp):
+            return np.sqrt(Rp[i] / Rn[i]), dp[i]
+
+        Rg_pos = np.interp(dp_g_nm, dp, Rp)
+        Rg_neg = np.interp(dp_g_nm, dp, Rn)
+
+        fw_pos = inv.wiedensohler(dp_g_m, "+")
+        fw_neg = inv.wiedensohler(dp_g_m, "-")
+
+        double_pos = Rg_pos * fw_pos[1] / fw_pos[0]
+        double_neg = Rg_neg * fw_neg[1] / fw_neg[0]
+
+        ok_pos = double_pos < 0.10 * Rp[i]
+        ok_neg = double_neg < 0.10 * Rn[i]
+
+        if ok_pos and ok_neg:
+            return np.sqrt(Rp[i] / Rn[i]), dp[i]
+
+    return np.nan, np.nan
+
 def compute_inversion_heatmap(df2):
     df2 = df2.copy()
     df2["abs_size_nm"] = df2["size_nm"].abs()
@@ -714,9 +791,25 @@ def compute_inversion_heatmap(df2):
 
     traces = []
     ntot_traces = []
+    
+    ion_x = []
+    ion_y = []
+    ion_dp = []
+    scan_zratios = {}
 
+    group_key = "scan_id" if "scan_id" in df2.columns else "scan_number"
     size_axis = sorted(set(abs(x["dp"]) for x in get_scan_program()))
     size_axis = np.asarray(size_axis, dtype=float)
+    
+    for sn, g_scan in df2.groupby(group_key):
+        zratio, selected_dp = estimate_ion_mobility_ratio_for_scan(g_scan)
+
+        scan_zratios[sn] = zratio
+
+        if np.isfinite(zratio):
+            ion_x.append(g_scan["time"].median())
+            ion_y.append(zratio)
+            ion_dp.append(selected_dp)
 
     for polarity, row in [("positive", 6), ("negative", 7)]:
         dd_pol = df2[df2["polarity"] == polarity].copy()
@@ -725,17 +818,19 @@ def compute_inversion_heatmap(df2):
         heat_times = []
         ntot_vals = []
 
-        for sn, g_scan in dd_pol.groupby("scan_id" if "scan_id" in dd_pol.columns else "scan_number"):
+        for sn, g_scan in dd_pol.groupby(group_key):
+            zratio = scan_zratios.get(sn, np.nan)
+            
             scan_parts = []
             ntot_scan = 0.0
 
             for scan_range, g in g_scan.groupby("scan_range"):
-                invdf = invert_one_scan(g, polarity, scan_range)
+                invdf = invert_one_scan(g, polarity, scan_range, zratio=zratio)
 
                 dp_inv = invdf["abs_size_nm"].to_numpy(dtype=float)
                 n_inv = invdf["N_inverted"].to_numpy(dtype=float)
 
-                ntot_scan += np.nansum(n_inv)
+                ntot_scan += trapezoid(n_inv, np.log(dp_inv))
 
                 order = np.argsort(dp_inv)
                 scan_parts.append((dp_inv[order], n_inv[order]))
@@ -757,12 +852,16 @@ def compute_inversion_heatmap(df2):
         if not heat_cols:
             continue
 
+        
+        
+        Z = np.column_stack(heat_cols)
+
         traces.append({
             "kind": "heatmap",
             "polarity": polarity,
             "scan_range": "all",
             "row": row,
-            "Z": np.column_stack(heat_cols),
+            "Z": Z,
             "x": heat_times,
             "y": size_axis,
             "name": f"{polarity} inverted",
@@ -771,10 +870,18 @@ def compute_inversion_heatmap(df2):
         ntot_traces.append({
             "kind": "ntot",
             "polarity": polarity,
-            "row": 8,
+            "row": 9,
             "x": heat_times,
             "y": ntot_vals,
             "name": f"Ntot {polarity}",
+        })
+    traces.append({
+            "kind": "ion_ratio",
+            "row": 8,
+            "x": ion_x,
+            "y": ion_y,
+            "selected_dp": ion_dp,
+            "name": "Ion mobility ratio Z+/Z-",
         })
 
     return traces + ntot_traces
@@ -849,11 +956,25 @@ def add_cached_heatmaps(fig):
                 y=tr["y"],
                 mode="lines+markers",
                 name=tr["name"],
+                row=9,
+                col=1,
+            )
+
+            fig.update_yaxes(title_text="Ntot", row=9, col=1)
+            fig.update_xaxes(title_text="Time", tickformat="%H:%M", row=9, col=1)
+            
+        elif tr["kind"] == "ion_ratio":
+            y = np.clip(tr["y"], 0.5, 2.0)
+            fig.add_scatter(
+                x=tr["x"],
+                y=y,
+                mode="lines+markers",
+                name=tr["name"],
                 row=8,
                 col=1,
             )
 
-            fig.update_yaxes(title_text="Ntot", row=8, col=1)
+            fig.update_yaxes(title_text="Z+ / Z-", row=8, col=1)
             fig.update_xaxes(title_text="Time", tickformat="%H:%M", row=8, col=1)
 
 
@@ -878,7 +999,9 @@ def startup_load():
         # also populate memory cache
         completed_scans.clear()
 
-        for sn, g in df0.groupby("scan_number"):
+        group_key = "scan_id" if "scan_id" in df0.columns else "scan_number"
+
+        for sn, g in df0.groupby(group_key):
             completed_scans.append(g.copy())
 
     else:
