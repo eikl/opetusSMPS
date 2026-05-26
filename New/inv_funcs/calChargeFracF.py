@@ -49,7 +49,7 @@ def cal_b(r, delta, q, a, a_i, epsp, T):
 
 def cal_bmin(delta, q, a, a_i, epsp, T):
     """Calculate minimum impact parameter"""
-    r = np.linspace(a, delta, 1000)
+    r = np.linspace(a * (1 + 1e-12), delta, 1000)
     b = np.array([cal_b(r_i, delta, q, a, a_i, epsp, T) for r_i in r])
     bmin = np.min(b)
     return bmin
@@ -60,7 +60,7 @@ def cal_beta(delta, q, a, a_i, D, c, alpha, epsp, T):
     temp1 = np.exp(-cal_U(delta, q, a, a_i, epsp) / (kB * T))
     term2 = np.pi * alpha * c * delta**2 * temp1
     term3 = temp1 * alpha * c * delta**2 / (4 * D * a)
-    x = np.linspace(0, a / delta, 10000)
+    x = np.linspace(np.finfo(float).eps, a / delta, 10000)
     dx = x[1] - x[0]
     term4 = np.sum(np.exp(cal_U(a / x, q, a, a_i, epsp) / (kB * T))) * dx
     beta = term2 / (1 + term3 * term4)

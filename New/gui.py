@@ -28,6 +28,8 @@ DEFAULT_SETTINGS = {
     "meas_time": 15,
     "sleep_time": 5,
     "n_scans_plot": 5,
+    "settling_time": 10,
+    "polarity_switch_time": 0,
 }
 
 inversion_executor = ThreadPoolExecutor(max_workers=1)
@@ -79,6 +81,8 @@ steps2 = pn.widgets.IntInput(name="Steps 2", value=20, step=1)
 
 meas_time = pn.widgets.IntInput(name="Measurement time per size (s)", value=15, step=1)
 sleep_time = pn.widgets.IntInput(name="Sleep time between measurements (s)", value=5, step=1)
+settling_time = pn.widgets.IntInput(name="Settling time between size changes (s) ", value=10, step=1)
+polarity_switch_time = pn.widgets.IntInput(name="Polarity switch time (s) ", value=0, step=1)
 
 status_text = pn.pane.Markdown("Status: idle")
 last_row_pane = pn.pane.Str("Last measurement: -")
@@ -129,6 +133,8 @@ def save_settings():
         "meas_time": int(meas_time.value),
         "sleep_time": int(sleep_time.value),
         "n_scans_plot": int(n_scans_plot.value),
+        "settling_time": int(settling_time.value),
+        "polarity_switch_time": int(polarity_switch_time.value),
     }
 
     with open(SETTINGS_FILE, "w") as f:
@@ -148,7 +154,6 @@ def load_settings():
 
     cpc_com_port.value = settings.get("cpc_com_port", DEFAULT_SETTINGS["cpc_com_port"])
 
-    # Supports both new settings and a few old keys harmlessly.
     range1.value = np.array(settings.get("range1", DEFAULT_SETTINGS["range1"]))
     sheath1.value = settings.get("range1_sheath", DEFAULT_SETTINGS["range1_sheath"])
     steps1.value = settings.get("range1_steps", DEFAULT_SETTINGS["range1_steps"])
@@ -160,6 +165,9 @@ def load_settings():
     meas_time.value = settings.get("meas_time", DEFAULT_SETTINGS["meas_time"])
     sleep_time.value = settings.get("sleep_time", DEFAULT_SETTINGS["sleep_time"])
     n_scans_plot.value = settings.get("n_scans_plot", DEFAULT_SETTINGS["n_scans_plot"])
+    
+    settling_time.value = settings.get("settling_time", DEFAULT_SETTINGS["settling_time"])
+    polarity_switch_time.value = settings.get("polarity_switch_time", DEFAULT_SETTINGS["polarity_switch_time"])
 
 ensure_settings_file()
 load_settings()
@@ -305,8 +313,11 @@ def ensure_measurement_thread():
         measurement_thread = threading.Thread(target=measurement_loop, daemon=True)
         measurement_thread.start()
 
+polarity_switch=-1
+measurement_finished = False
+
 def measurement_step(debug=True):
-    global current_size_index, phase, phase_start_time, scan_number, latest_inversion_signature
+    global current_size_index, phase, phase_start_time, scan_number, latest_inversion_signature, polarity_switch, measurement_finished
 
     if not start_button.value:
         return
@@ -340,6 +351,16 @@ def measurement_step(debug=True):
 
             flow_controller.setpoint(q_sheath)
             ctl.HV.voltage_set(dp, Q_sh_lpm=q_sheath)
+            
+            if np.sign(dp) == polarity_switch:
+                time.sleep(float(polarity_switch_time.value))
+                polarity_switch = polarity_switch * -1
+                phase_start_time = time.time()
+                
+            if measurement_finished:
+                time.sleep(float(settling_time.value))
+                measurement_finished = False
+                phase_start_time = now
 
             cpc_count = cpc.read_instrument()
             flow = flowmeter.get_flow()
@@ -377,6 +398,7 @@ def measurement_step(debug=True):
             if now - phase_start_time >= meas_sec:
                 phase_start_time = now
                 current_size_index += 1
+                measurement_finished = True
                 if current_size_index >= len(scan):
                     current_size_index = 0
     
@@ -472,6 +494,8 @@ def invert_one_scan(d, polarity, scan_range, zratio = None, temp=293.15, press=1
 
     dma = ctl.HaukeDMA()
     A = np.zeros((len(dp_meas_nm), len(dp_grid_nm)))
+    A2 = np.zeros((len(dp_meas_nm), len(dp_grid_nm)))
+    A3 = np.zeros((len(dp_meas_nm), len(dp_grid_nm)))
 
     qa = 1.0 / 60000.0
     qs = 1.0 / 60000.0
@@ -479,8 +503,6 @@ def invert_one_scan(d, polarity, scan_range, zratio = None, temp=293.15, press=1
     qc = q_sheath / 60000.0
     qm = qc + qa - qs
 
-    # match old sign convention:
-    # pol=+1 uses negative charges, pol=-1 uses positive charges
     if polarity == "positive":
         p = np.arange(-1, -6, -1, dtype=float)
     else:
@@ -496,8 +518,8 @@ def invert_one_scan(d, polarity, scan_range, zratio = None, temp=293.15, press=1
             zratio = 1.35e-4 / 1.60e-4
 
         
-        Zp = 1e-4
-        Zn = zratio * Zp
+        Zn = 1e-4
+        Zp = zratio * Zn
         
         args = (
             temp, press, p, voltage,
@@ -510,18 +532,50 @@ def invert_one_scan(d, polarity, scan_range, zratio = None, temp=293.15, press=1
             "gunn woessner mod",
             0,
         )
+        
+        args2 = (
+            temp, press, p, voltage,
+            dma.L, dma.r2, dma.r1,
+            qa, qc, qm, qs,
+            1.0, qa, 1,
+            Zp, Zn,
+            140, 101,
+            1e13, 1e13,
+            "wiedensohler",
+            0,
+        )
+        
+        args3 = (
+            temp, press, p, voltage,
+            dma.L, dma.r2, dma.r1,
+            qa, qc, qm, qs,
+            1.0, qa, 1,
+            Zp, Zn,
+            140, 101,
+            1e13, 1e13,
+            "fuchs",
+            0,
+        )
 
         for j in range(len(dp_grid_nm)):
             a = limits[j]
             b = limits[j + 1]
             val, _ = quad(inv.intfun, a, b, args=args, limit=50)
+            val2, _ = quad(inv.intfun, a, b, args=args2, limit=50)
+            val3, _ = quad(inv.intfun, a, b, args=args3, limit=50)
             A[i, j] = val / (b - a)
+            A2[i, j] = val2 / (b - a)
+            A3[i, j] = val3 / (b - a)
 
     x, rnorm = nnls(A, y)
+    x2, rnorm2 = nnls(A2, y)
+    x3, rnorm3 = nnls(A3, y)
 
     return pd.DataFrame({
         "abs_size_nm": dp_grid_nm,
-        "N_inverted": x,
+        "N_GWalpha": x,
+        "N_Wiedensohler": x2,
+        "N_Fuchs": x3
     })
 
 
@@ -830,20 +884,28 @@ def compute_inversion_heatmap(df2):
         heat_cols = []
         heat_times = []
         ntot_vals = []
+        ntot_vals_wiedensohler = []
+        ntot_vals_Fuchs = []
 
         for sn, g_scan in dd_pol.groupby(group_key):
             zratio = scan_zratios.get(sn, np.nan)
             
             scan_parts = []
             ntot_scan = 0.0
+            ntot_scan_wiedensohler = 0.0
+            ntot_scan_Fuchs = 0.0
 
             for scan_range, g in g_scan.groupby("scan_range"):
                 invdf = invert_one_scan(g, polarity, scan_range, zratio=zratio)
 
                 dp_inv = invdf["abs_size_nm"].to_numpy(dtype=float)
-                n_inv = invdf["N_inverted"].to_numpy(dtype=float)
+                n_inv = invdf["N_GWalpha"].to_numpy(dtype=float)
+                n_inv_wiedensohler = invdf["N_Wiedensohler"].to_numpy(dtype=float)
+                n_Fuchs = invdf["N_Fuchs"].to_numpy(dtype=float)
 
                 ntot_scan += trapezoid(n_inv, np.log(dp_inv))
+                ntot_scan_wiedensohler += trapezoid(n_inv_wiedensohler, np.log(dp_inv))
+                ntot_scan_Fuchs += trapezoid(n_Fuchs, np.log(dp_inv))
 
                 order = np.argsort(dp_inv)
                 scan_parts.append((dp_inv[order], n_inv[order]))
@@ -857,10 +919,13 @@ def compute_inversion_heatmap(df2):
                     np.log10(dp_inv),
                     n_inv,
                 )
+                
 
             heat_cols.append(full_col)
             heat_times.append(g_scan["time"].median())
             ntot_vals.append(ntot_scan)
+            ntot_vals_wiedensohler.append(ntot_scan_wiedensohler)
+            ntot_vals_Fuchs.append(ntot_scan_Fuchs)
 
         if not heat_cols:
             continue
@@ -886,7 +951,23 @@ def compute_inversion_heatmap(df2):
             "row": 9,
             "x": heat_times,
             "y": ntot_vals,
-            "name": f"Ntot {polarity}",
+            "name": f"Ntot GW {polarity}",
+        })
+        ntot_traces.append({
+            "kind": "ntot",
+            "polarity": polarity,
+            "row": 9,
+            "x": heat_times,
+            "y": ntot_vals_wiedensohler,
+            "name": f"Ntot Wiedensohler {polarity}",
+        })
+        ntot_traces.append({
+            "kind": "ntot",
+            "polarity": polarity,
+            "row": 9,
+            "x": heat_times,
+            "y": ntot_vals_Fuchs,
+            "name": f"Ntot Fuchs {polarity}",
         })
     traces.append({
             "kind": "ion_ratio",
@@ -901,7 +982,6 @@ def compute_inversion_heatmap(df2):
 
 
 def start_inversion_job(df2):
-    """Start one background inversion job if needed."""
     global inversion_running, latest_inversion_signature
 
     signature = _scan_signature(df2)
@@ -964,14 +1044,38 @@ def add_cached_heatmaps(fig):
             fig.update_xaxes(title_text="Time", tickformat="%H:%M", row=tr["row"], col=1)
 
         elif tr["kind"] == "ntot":
-            fig.add_scatter(
-                x=tr["x"],
-                y=tr["y"],
-                mode="lines+markers",
-                name=tr["name"],
-                row=9,
-                col=1,
-            )
+            
+            if tr["name"].startswith("Ntot GW"):
+                fig.add_scatter(
+                    x=tr["x"],
+                    y=tr["y"],
+                    mode="lines+markers",
+                    name=tr["name"],
+                    row=9,
+                    col=1,
+                )
+                
+            elif tr["name"].startswith("Ntot Wiedensohler"):
+                fig.add_scatter(
+                    x=tr["x"],
+                    y=tr["y"],
+                    mode="lines+markers",
+                    name=tr["name"],
+                    row=9,
+                    col=1,
+                )
+                
+            elif tr["name"].startswith("Ntot Fuchs"):
+                fig.add_scatter(
+                    x=tr["x"],
+                    y=tr["y"],
+                    mode="lines+markers",
+                    name=tr["name"],
+                    row=9,
+                    col=1,
+                )
+            
+        
 
             fig.update_yaxes(title_text="Ntot", row=9, col=1)
             fig.update_xaxes(title_text="Time", tickformat="%H:%M", row=9, col=1)
@@ -1037,6 +1141,8 @@ for widget in [
     meas_time,
     sleep_time,
     n_scans_plot,
+    settling_time,
+     polarity_switch_time,
 ]:
     widget.param.watch(on_scan_setting_change, "value")
 
@@ -1058,7 +1164,7 @@ layout = pn.Column(
     "### Scan range 2",
     pn.Row(range2, sheath2, steps2),
     scan_pane,
-    pn.Row(meas_time, sleep_time, n_scans_plot),
+    pn.Row(meas_time, sleep_time, n_scans_plot, settling_time, polarity_switch_time),
     "### Live data",
     last_row_pane,
     table_pane,
@@ -1071,7 +1177,7 @@ layout = pn.Column(
 layout.servable()
 
 
-# To host via Tailscale. Update websocket_origin IPs if your Tailscale IPs change.
+# To host via Tailscale. Update the websocket_origin list with your Tailscale IPs to get access.
 pn.serve(
     layout,
     address="0.0.0.0",

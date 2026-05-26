@@ -52,19 +52,25 @@ def intfun(dp, t, press, p, volt, pituus, arkaksi, aryksi, qa, qc, qm, qs,
         for i in range(len(p)):
             charge[:, i] = gunn_woessner_modified(
                 p[i], dp, t, Zp, Zn, Mrp, Mrn, Np, Nn, summed)
-
+            
     elif charging_efficiency == 'fuchs':
         charge = np.zeros((len(dp), len(p)))
-        tmp = np.zeros((len(dp), 2 * len(p) + 1))
+
         for i in range(len(dp)):
-            tmp = calChargeFracF(dp[i], len(p), Zp, Zn, Mrp, Mrn, Np, Nn, 1000, t, press)
-        if p[0] < 0:
-            charge = tmp[:, 0:len(p)]
-        else:
-            charge = tmp[:, len(p):]
-    else:
-        raise ValueError(
-            'charging_efficiency not recognised. Most probably a spelling mistake.')
+            frac, beta_p, beta_n = calChargeFracF(
+                dp[i], Zp, Zn, Mrp, Mrn,
+                Np=Np, Nn=Nn, epsp=1000, T=t, P=press
+            )
+
+            # calChargeFracF returns charges from -5 ... +5
+            # index = q + 5
+            idx = (p.astype(int) + 5).astype(int)
+
+            if summed == 1:
+                idx_opposite = ((-p).astype(int) + 5).astype(int)
+                charge[i, :] = frac[idx] + frac[idx_opposite]
+            else:
+                charge[i, :] = frac[idx]
 
     # Sum over charges, then multiply by losses; res shape (n_dp,)
     res = np.sum(tr * charge, axis=1) * totalloss
