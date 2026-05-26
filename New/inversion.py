@@ -1,10 +1,8 @@
 import panel as pn
 import pandas as pd
 import time
-import DmpsControl as ctl
 import inv_funcs as inv
 import numpy as np
-import csv
 import json
 from pathlib import Path
 from datetime import datetime
@@ -15,21 +13,10 @@ from scipy.integrate import quad, trapezoid
 from scipy.optimize import nnls
 from concurrent.futures import ThreadPoolExecutor
 
-SETTINGS_FILE = Path("settings.json")
+SETTINGS_FILE = Path("settings_inversion.json")
 
 DEFAULT_SETTINGS = {
-    "cpc_com_port": "/dev/ttyAMA0",
-    "range1": [1, 40],
-    "range1_sheath": 20,
-    "range1_steps": 20,
-    "range2": [20, 400],
-    "range2_sheath": 5,
-    "range2_steps": 20,
-    "meas_time": 15,
-    "sleep_time": 5,
-    "n_scans_plot": 5,
-    "settling_time": 10,
-    "polarity_switch_time": 0,
+
 }
 
 inversion_executor = ThreadPoolExecutor(max_workers=1)
@@ -42,74 +29,10 @@ inversion_lock = threading.Lock()
 # source ./venv/bin/activate
 # python gui.py
 
-flowmeter = None
-blower = None
-flow_controller = None
-cpc = None
-
-measurement_running = threading.Event()
-measurement_thread = None
-
 pn.extension("plotly")
 
 #### Widgets ####
-cpc_com_port = pn.widgets.TextInput(name="CPC COM port", value="/dev/ttyAMA0")
 
-start_button = pn.widgets.Toggle(name="Start measurement", button_type="success")
-init_button = pn.widgets.Button(name="Initialize hardware", button_type="primary")
-stop_button = pn.widgets.Button(name="Stop and zero HV", button_type="danger")
-
-
-
-n_scans_plot = pn.widgets.IntInput(name="Number of completed scans to plot",value=3,step=1)
-
-range1 = pn.widgets.ArrayInput(
-    name="Range 1 [min,max] nm",
-    value=np.array([1, 40]),
-    max_array_size=2,
-)
-sheath1 = pn.widgets.IntInput(name="Sheath 1 (L/min)", value=20, step=1)
-steps1 = pn.widgets.IntInput(name="Steps 1", value=20, step=1)
-
-range2 = pn.widgets.ArrayInput(
-    name="Range 2 [min,max] nm",
-    value=np.array([20, 400]),
-    max_array_size=2,
-)
-sheath2 = pn.widgets.IntInput(name="Sheath 2 (L/min)", value=5, step=1)
-steps2 = pn.widgets.IntInput(name="Steps 2", value=20, step=1)
-
-meas_time = pn.widgets.IntInput(name="Measurement time per size (s)", value=15, step=1)
-sleep_time = pn.widgets.IntInput(name="Sleep time between measurements (s)", value=5, step=1)
-settling_time = pn.widgets.IntInput(name="Settling time between size changes (s) ", value=10, step=1)
-polarity_switch_time = pn.widgets.IntInput(name="Polarity switch time (s) ", value=0, step=1)
-
-status_text = pn.pane.Markdown("Status: idle")
-last_row_pane = pn.pane.Str("Last measurement: -")
-scan_pane = pn.pane.Str("Scan program: -")
-
-table_pane = pn.widgets.DataFrame(
-    pd.DataFrame(
-        columns=[
-            "time",
-            "scan_range",
-            "size_nm",
-            "cpc_count",
-            "sheath_flow",
-            "sheath_setpoint",
-        ]
-    ),
-    height=220,
-    width=900,
-)
-
-rows = []
-current_size_index = 0
-phase = "idle"
-phase_start_time = time.time()
-scan_rows = []
-completed_scans = []
-scan_number = 0
 
 def ensure_settings_file():
     if not SETTINGS_FILE.exists():
@@ -117,24 +40,9 @@ def ensure_settings_file():
             json.dump(DEFAULT_SETTINGS, f, indent=2)
 
 
-def _int_list(value):
-    return [int(x) for x in np.array(value).ravel()]
-
-
 def save_settings():
     settings = {
-        "cpc_com_port": str(cpc_com_port.value),
-        "range1": _int_list(range1.value),
-        "range1_sheath": int(sheath1.value),
-        "range1_steps": int(steps1.value),
-        "range2": _int_list(range2.value),
-        "range2_sheath": int(sheath2.value),
-        "range2_steps": int(steps2.value),
-        "meas_time": int(meas_time.value),
-        "sleep_time": int(sleep_time.value),
-        "n_scans_plot": int(n_scans_plot.value),
-        "settling_time": int(settling_time.value),
-        "polarity_switch_time": int(polarity_switch_time.value),
+
     }
 
     with open(SETTINGS_FILE, "w") as f:
@@ -152,44 +60,15 @@ def load_settings():
         with open(SETTINGS_FILE, "r") as f:
             settings = json.load(f)
 
-    cpc_com_port.value = settings.get("cpc_com_port", DEFAULT_SETTINGS["cpc_com_port"])
-
-    range1.value = np.array(settings.get("range1", DEFAULT_SETTINGS["range1"]))
-    sheath1.value = settings.get("range1_sheath", DEFAULT_SETTINGS["range1_sheath"])
-    steps1.value = settings.get("range1_steps", DEFAULT_SETTINGS["range1_steps"])
-
-    range2.value = np.array(settings.get("range2", DEFAULT_SETTINGS["range2"]))
-    sheath2.value = settings.get("range2_sheath", DEFAULT_SETTINGS["range2_sheath"])
-    steps2.value = settings.get("range2_steps", DEFAULT_SETTINGS["range2_steps"])
-
-    meas_time.value = settings.get("meas_time", DEFAULT_SETTINGS["meas_time"])
-    sleep_time.value = settings.get("sleep_time", DEFAULT_SETTINGS["sleep_time"])
-    n_scans_plot.value = settings.get("n_scans_plot", DEFAULT_SETTINGS["n_scans_plot"])
-    
-    settling_time.value = settings.get("settling_time", DEFAULT_SETTINGS["settling_time"])
-    polarity_switch_time.value = settings.get("polarity_switch_time", DEFAULT_SETTINGS["polarity_switch_time"])
 
 ensure_settings_file()
 load_settings()
 
-def bipolar_log_sizes(size_range_value, n, order="negative_then_positive"):
-    lo, hi = np.array(size_range_value).ravel().astype(float)
-    lo, hi = abs(lo), abs(hi)
+    
+def get_recent_completed_scans(n=None):
 
-    if lo <= 0 or hi <= 0:
-        raise ValueError("Use positive nonzero limits, e.g. [20, 400]")
-    if hi < lo:
-        lo, hi = hi, lo
-    if int(n) < 2:
-        raise ValueError("steps must be >= 2")
-
-    pos = np.round(np.logspace(np.log10(lo), np.log10(hi), int(n))).astype(int)
-    pos = list(dict.fromkeys([int(x) for x in pos if int(x) != 0]))
-    neg = [-x for x in pos]
-
-    if order == "positive_then_negative":
-        return pos + neg
-    return neg + pos
+    if n is None:
+        n = int(n_scans_plot.value)
 
 def save_completed_scan(scan_rows, scan_number):
     if not scan_rows:
@@ -204,12 +83,6 @@ def save_completed_scan(scan_rows, scan_number):
 
     pd.DataFrame(scan_rows).to_csv(path, index=False)
     print(f"Saved completed scan: {path}", flush=True)
-    
-def get_recent_completed_scans(n=None):
-
-    if n is None:
-        n = int(n_scans_plot.value)
-
     root = Path("logs/scans")
     if not root.exists():
         print(f"No scan root found: {root}", flush=True)
@@ -234,12 +107,6 @@ def get_recent_completed_scans(n=None):
 
     return pd.DataFrame()
 
-def load_initial_scans_to_table():
-    df0 = get_recent_completed_scans(int(n_scans_plot.value))
-    if df0 is not None and not df0.empty:
-        table_pane.value = df0.tail(100)
-    else:
-        print("No completed scans found on startup", flush=True)
 
 def get_scan_program():
     scan = []
@@ -260,218 +127,6 @@ def update_scan_preview():
     except Exception as e:
         scan_pane.object = f"Scan parse error: {e}"
 
-def stop_and_zero():
-    global phase, current_size_index, phase_start_time
-
-    measurement_running.clear()
-
-    if start_button.value:
-        start_button.value = False
-
-    phase = "idle"
-    current_size_index = 0
-    phase_start_time = time.time()
-
-    try:
-        ctl.HV.zero()
-    except OSError:
-        ctl.setup()
-        ctl.HV.zero()
-
-    status_text.object = "Status: stopped, HV zeroed"
-
-def init():
-    global flowmeter, blower, flow_controller, cpc
-
-    if flow_controller is not None:
-        return
-
-    flowmeter = ctl.Flowmeter()
-    blower = ctl.BlowerDAC()
-    cpc = ctl.CPC(cpc_com_port.value)
-
-    ctl.setup()
-    ctl.HV.zero()
-
-    flow_controller = ctl.blower.FlowController(
-        flowmeter,
-        blower,
-        flow_lpm=float(sheath1.value),
-    )
-    flow_controller.start()
-    status_text.object = "Status: hardware initialized"
-
-def measurement_loop():
-    while True:
-        if measurement_running.is_set():
-            measurement_step()
-        time.sleep(float(sleep_time.value))
-
-def ensure_measurement_thread():
-    global measurement_thread
-    if measurement_thread is None or not measurement_thread.is_alive():
-        measurement_thread = threading.Thread(target=measurement_loop, daemon=True)
-        measurement_thread.start()
-
-polarity_switch=-1
-measurement_finished = False
-
-def measurement_step(debug=True):
-    global current_size_index, phase, phase_start_time, scan_number, latest_inversion_signature, polarity_switch, measurement_finished
-
-    if not start_button.value:
-        return
-
-    if flow_controller is None:
-        init()
-
-    scan = get_scan_program()
-    if not scan:
-        status_text.object = "Status: no scan points defined"
-        return
-
-    now = time.time()
-    meas_sec = float(meas_time.value)
-
-    try:
-        if phase == "idle":
-            phase = "measuring"
-            phase_start_time = now
-            current_size_index = 0
-
-            point = scan[current_size_index]
-            flow_controller.setpoint(point["sheath"])
-            ctl.HV.voltage_set(point["dp"], Q_sh_lpm=point["sheath"])
-
-        if phase == "measuring":
-            point = scan[current_size_index]
-            dp = point["dp"]
-            q_sheath = point["sheath"]
-            scan_range = point["scan_range"]
-
-            flow_controller.setpoint(q_sheath)
-            ctl.HV.voltage_set(dp, Q_sh_lpm=q_sheath)
-            
-            if np.sign(dp) == polarity_switch:
-                time.sleep(float(polarity_switch_time.value))
-                polarity_switch = polarity_switch * -1
-                phase_start_time = time.time()
-                
-            if measurement_finished:
-                time.sleep(float(settling_time.value))
-                measurement_finished = False
-                phase_start_time = now
-
-            cpc_count = cpc.read_instrument()
-            flow = flowmeter.get_flow()
-
-            local_log = Path("logs") / f"measurement_{datetime.now().strftime('%Y%m%d')}.csv"
-
-            row = {
-                "time": datetime.now().isoformat(),
-                "scan_range": scan_range,
-                "size_nm": dp,
-                "cpc_count": cpc_count,
-                "sheath_flow": flow,
-                "sheath_setpoint": q_sheath,
-                "scan_number": scan_number,
-            }
-
-            if debug:
-                print(row, flush=True)
-
-            rows.append(row)
-            scan_rows.append(row)
-
-            log_row(row, local_log=local_log, cloud_log=None)
-
-            doc = pn.state.curdoc
-
-            if doc is not None:
-                doc.add_next_tick_callback(
-                    lambda row=row: setattr(last_row_pane, "object", str(row))
-                )
-            else:
-                last_row_pane.object = str(row)
-                        
-
-            if now - phase_start_time >= meas_sec:
-                phase_start_time = now
-                current_size_index += 1
-                measurement_finished = True
-                if current_size_index >= len(scan):
-                    current_size_index = 0
-    
-                    
-                    scan_number += 1
-
-                    save_completed_scan(scan_rows, scan_number)
-                    with inversion_lock:
-                        latest_inversion_signature = None
-                    df2 = get_recent_completed_scans(int(n_scans_plot.value))
-                    start_inversion_job(df2)
-                    completed_scans.append(pd.DataFrame(scan_rows.copy()))
-
-                    scan_rows.clear()
-                    ctl.HV.zero()
-
-        if rows:
-            latest_df = pd.DataFrame(rows[-100:])
-
-            doc = pn.state.curdoc
-
-            if doc is not None:
-                doc.add_next_tick_callback(
-                    lambda df=latest_df: setattr(table_pane, "value", df)
-                )
-            else:
-                table_pane.value = latest_df
-
-    except Exception as e:
-        traceback.print_exc()
-        status_text.object = f"Measurement error: {e}"
-        print(f"Measurement error: {e}", flush=True)
-
-
-def append_row_csv(path, row):
-    path = Path(path)
-    path.parent.mkdir(parents=True, exist_ok=True)
-    file_exists = path.exists()
-
-    with open(path, "a", newline="") as f:
-        writer = csv.DictWriter(f, fieldnames=list(row.keys()))
-        if not file_exists:
-            writer.writeheader()
-        writer.writerow(row)
-
-
-def log_row(row, local_log, cloud_log=None):
-    append_row_csv(local_log, row)
-    if cloud_log is not None:
-        try:
-            append_row_csv(cloud_log, row)
-        except Exception as e:
-            status_text.object = f"Cloud log failed, local OK: {e}"
-
-
-
-def on_start_change(event):
-    global phase, phase_start_time, current_size_index
-
-    if event.new:
-        init()
-        ensure_measurement_thread()
-
-        phase = "idle"
-        phase_start_time = time.time()
-        current_size_index = 0
-
-        measurement_running.set()
-        status_text.object = "Status: running"
-
-    else:
-        measurement_running.clear()
-        status_text.object = "Status: stopped"
 
 def invert_one_scan(d, polarity, scan_range, zratio = None, temp=293.15, press=101325):
     d = d.copy()
@@ -722,8 +377,6 @@ def make_plot(df):
     )
 
 
-
-
 def _scan_signature(df2):
     if df2 is None or df2.empty:
         return None
@@ -734,17 +387,6 @@ def _scan_signature(df2):
     nplot = int(n_scans_plot.value)
 
     return (nrows, scan_ids, tmax, nplot)
-
-def _size_axis_for_range(scan_range):
-    sizes = sorted(
-        set(
-            abs(x["dp"])
-            for x in get_scan_program()
-            if int(x["scan_range"]) == int(scan_range)
-        )
-    )
-    return np.asarray(sizes, dtype=float)
-
 
 def estimate_ion_mobility_ratio_for_scan(g_scan, temp=293.15, press=101325):
     d = g_scan.copy()
@@ -1054,26 +696,10 @@ def on_scan_setting_change(event):
     update_scan_preview()
 
 for widget in [
-    cpc_com_port,
-    range1,
-    sheath1,
-    steps1,
-    range2,
-    sheath2,
-    steps2,
-    meas_time,
-    sleep_time,
-    n_scans_plot,
-    settling_time,
-     polarity_switch_time,
+ 
 ]:
     widget.param.watch(on_scan_setting_change, "value")
 
-start_button.param.watch(on_start_change, "value")
-init_button.on_click(lambda event: init())
-stop_button.on_click(lambda event: stop_and_zero())
-
-update_scan_preview()
 
 #### Layout ####
 layout = pn.Column(
@@ -1103,8 +729,9 @@ layout.servable()
 # To host via Tailscale. Update the websocket_origin list with your Tailscale IPs to get access.
 pn.serve(
     layout,
+    autoreload=True,
     address="0.0.0.0",
     port=5006,
-    show=False,
+    show=True,
     websocket_origin=["100.77.46.12:5006", "100.104.173.10:5006", "100.104.216.3:5006", "localhost:5006"],
 )
