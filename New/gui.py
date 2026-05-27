@@ -253,11 +253,13 @@ def load_initial_scans_to_table():
 def get_scan_program():
     scan = []
 
-    for dp in bipolar_log_sizes(range1.value, int(steps1.value)):
-        scan.append({"scan_range": 1, "dp": int(dp), "sheath": float(sheath1.value)})
+    if int(steps1.value) > 1:
+        for dp in bipolar_log_sizes(range1.value, int(steps1.value)):
+            scan.append({"scan_range": 1, "dp": int(dp), "sheath": float(sheath1.value)})
 
-    for dp in bipolar_log_sizes(range2.value, int(steps2.value)):
-        scan.append({"scan_range": 2, "dp": int(dp), "sheath": float(sheath2.value)})
+    if int(steps2.value) > 2:
+        for dp in bipolar_log_sizes(range2.value, int(steps2.value)):
+            scan.append({"scan_range": 2, "dp": int(dp), "sheath": float(sheath2.value)})
 
     return scan
 
@@ -322,8 +324,8 @@ def ensure_measurement_thread():
         measurement_thread = threading.Thread(target=measurement_loop, daemon=True)
         measurement_thread.start()
 
-polarity_switch=-1
-measurement_finished = False
+polarity_switch=1
+measurement_finished = True
 
 def measurement_step(debug=True):
     global current_size_index, phase, phase_start_time, scan_number, latest_inversion_signature, polarity_switch, measurement_finished
