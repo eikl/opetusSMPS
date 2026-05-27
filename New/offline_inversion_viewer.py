@@ -364,9 +364,8 @@ plot_button.on_click(plot_selected_scans)
 def estimate_ion_mobility_ratio_for_scan(g_scan, temp=293.15, press=101325):
     d = g_scan.copy()
     d["cpc_float"] = pd.to_numeric(d["cpc_count"], errors="coerce")
-    d["abs_size_nm"] = pd.to_numeric(d["size_nm"], errors="coerce").abs()
-    d["polarity"] = np.where(d["size_nm"] > 0, "pos", "neg")
-
+    d["abs_size_nm"] = d["size_nm"].abs()
+    d["polarity"] = np.where(d["size_nm"].astype(float) > 0, "pos", "neg")
     grouped = (
         d.groupby(["abs_size_nm", "polarity"])["cpc_float"]
         .mean()
@@ -387,17 +386,99 @@ def estimate_ion_mobility_ratio_for_scan(g_scan, temp=293.15, press=101325):
         return np.nan, np.nan
 
     dp = m["abs_size_nm"].to_numpy(dtype=float)
-    rp = m["R_pos"].to_numpy(dtype=float)
-    rn = m["R_neg"].to_numpy(dtype=float)
+    Rp = m["R_pos"].to_numpy(dtype=float)
+    Rn = m["R_neg"].to_numpy(dtype=float)
 
-    start = int(np.nanargmax(rp + rn))
+    # start from largest-size peak
+    start = np.argmax(Rp + Rn)
 
     for i in range(start, len(dp)):
-        if rp[i] <= 0 or rn[i] <= 0:
+        if Rp[i] <= 0 or Rn[i] <= 0:
             continue
 
-        # Simple current estimator. More detailed double-charge filtering can be added later.
-        return float(np.sqrt(rp[i] / rn[i])), float(dp[i])
+        dp_i_m = dp[i] * 1e-9
+
+        # singly charged mobility at dp_i
+        mob_i = (
+            1.602176634e-19
+            * cunningham_correction(dp_i_m, T=temp, P=press)
+            / (3 * np.pi * 1.81e-5 * dp_i_m)
+        )
+
+        # doubly charged contaminant: same mobility => particle mobility is half
+        dp_g_m = inv.min_mob(np.array([0.5 * mob_i]), temp, press)[0]
+        dp_g_nm = dp_g_m * 1e9
+
+        if dp_g_nm > np.nanmax(dp):
+            return np.sqrt(Rp[i] / Rn[i]), dp[i]
+
+        Rg_pos = np.interp(dp_g_nm, dp, Rp)
+        Rg_neg = np.interp(dp_g_nm, dp, Rn)
+
+        zratio_default = float(zratio_widget.value)
+        Zn = 1e-4
+        Zp = zratio_default * Zn
+
+        fw_pos_1 = inv.gunn_woessner_modified(
+            1,
+            np.array([dp_g_m]),
+            temp,
+            Zp,
+            Zn,
+            140,
+            101,
+            1e13,
+            1e13,
+            0,
+        )
+        
+        fw_pos_2 = inv.gunn_woessner_modified(
+            2,
+            np.array([dp_g_m]),
+            temp,
+            Zp,
+            Zn,
+            140,
+            101,
+            1e13,
+            1e13,
+            0,
+        )
+
+        fw_neg_1 = inv.gunn_woessner_modified(
+            -1,
+            np.array([dp_g_m]),
+            temp,
+            Zp,
+            Zn,
+            140,
+            101,
+            1e13,
+            1e13,
+            0,
+        )
+        
+        fw_neg_2 = inv.gunn_woessner_modified(
+            -2,
+            np.array([dp_g_m]),
+            temp,
+            Zp,
+            Zn,
+            140,
+            101,
+            1e13,
+            1e13,
+            0,
+        )
+
+        double_pos = Rg_pos * fw_pos_2 / fw_pos_1
+        double_neg = Rg_neg * fw_neg_2 / fw_neg_1
+
+        ok_pos = double_pos < 0.10 * Rp[i]
+        ok_neg = double_neg < 0.10 * Rn[i]
+
+        if ok_pos and ok_neg:
+            return np.sqrt(Rp[i] / Rn[i]), dp[i]
 
     return np.nan, np.nan
 
@@ -499,7 +580,7 @@ def run_inversion_calculation(df):
             temp=float(temp_K.value),
             press=float(press_Pa.value),
         )
-        zratios[scan_id] = zratio
+        zratios[scan_id] = 1/zratio
         if np.isfinite(zratio):
             ion_points.append((g_scan["time"].median(), zratio, selected_dp, scan_id))
 
@@ -670,16 +751,26 @@ def run_inversion(event=None):
 
     fut = inversion_executor.submit(run_inversion_calculation, df)
 
+    doc = pn.state.curdoc
     def done_callback(future):
         global inversion_running, latest_inversion
         try:
             result = future.result()
             latest_inversion = result
-            pn.state.curdoc.add_next_tick_callback(lambda: plot_inversion_result(result))
-            pn.state.curdoc.add_next_tick_callback(lambda: setattr(status, "object", "Inversion finished."))
+            if doc is not None:
+                doc.add_next_tick_callback(lambda: plot_inversion_result(result))
+                doc.add_next_tick_callback(lambda: setattr(status, "object", "Inversion finished."))
+            else:
+                plot_inversion_result(result)
+                status.object = "Inversion finished."
         except Exception:
             traceback.print_exc()
-            pn.state.curdoc.add_next_tick_callback(lambda: setattr(status, "object", "Inversion failed. Check terminal."))
+            if doc is not None:
+                doc.add_next_tick_callback(
+                    lambda: setattr(status, "object", "Inversion failed. Check terminal.")
+                )
+            else:
+                status.object = "Inversion failed. Check terminal."
         finally:
             with inversion_lock:
                 inversion_running = False

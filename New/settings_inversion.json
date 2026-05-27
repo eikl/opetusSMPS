@@ -1,13 +1,13 @@
 {
   "scan_root": "logs/scans",
-  "n_scans_plot": 5,
+  "n_scans_plot": 100,
   "dma_L": 0.28,
   "dma_r1": 0.025,
   "dma_r2": 0.033,
   "qa_lpm": 1.0,
   "qs_lpm": 1.0,
   "temp_K": 293.15,
-  "press_Pa": 101325,
-  "zratio": 0.8437499999999999,
-  "heatmap_clip": 20000
+  "press_Pa": 101325.0,
+  "zratio": 0.754147813,
+  "heatmap_clip": 20000.0
 }
