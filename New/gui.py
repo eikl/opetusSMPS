@@ -30,6 +30,7 @@ DEFAULT_SETTINGS = {
     "n_scans_plot": 5,
     "settling_time": 10,
     "polarity_switch_time": 0,
+    "Bipolar_toggle": True,
 }
 
 inversion_executor = ThreadPoolExecutor(max_workers=1)
@@ -58,6 +59,7 @@ cpc_com_port = pn.widgets.TextInput(name="CPC COM port", value="/dev/ttyAMA0")
 start_button = pn.widgets.Toggle(name="Start measurement", button_type="success")
 init_button = pn.widgets.Button(name="Initialize hardware", button_type="primary")
 stop_button = pn.widgets.Button(name="Stop and zero HV", button_type="danger")
+Bipolar_toggle = pn.widgets.Toggle(name="Bipolar scan", button_type="primary", value=True)
 
 
 
@@ -135,6 +137,7 @@ def save_settings():
         "n_scans_plot": int(n_scans_plot.value),
         "settling_time": int(settling_time.value),
         "polarity_switch_time": int(polarity_switch_time.value),
+        "Bipolar_toggle": bool(Bipolar_toggle.value),
     }
 
     with open(SETTINGS_FILE, "w") as f:
@@ -165,7 +168,8 @@ def load_settings():
     meas_time.value = settings.get("meas_time", DEFAULT_SETTINGS["meas_time"])
     sleep_time.value = settings.get("sleep_time", DEFAULT_SETTINGS["sleep_time"])
     n_scans_plot.value = settings.get("n_scans_plot", DEFAULT_SETTINGS["n_scans_plot"])
-    
+    Bipolar_toggle.value = settings.get("Bipolar_toggle", DEFAULT_SETTINGS["Bipolar_toggle"])
+
     settling_time.value = settings.get("settling_time", DEFAULT_SETTINGS["settling_time"])
     polarity_switch_time.value = settings.get("polarity_switch_time", DEFAULT_SETTINGS["polarity_switch_time"])
 
@@ -173,6 +177,8 @@ ensure_settings_file()
 load_settings()
 
 def bipolar_log_sizes(size_range_value, n, order="negative_then_positive"):
+    global Bipolar_toggle
+    
     lo, hi = np.array(size_range_value).ravel().astype(float)
     lo, hi = abs(lo), abs(hi)
 
@@ -185,7 +191,10 @@ def bipolar_log_sizes(size_range_value, n, order="negative_then_positive"):
 
     pos = np.round(np.logspace(np.log10(lo), np.log10(hi), int(n))).astype(int)
     pos = list(dict.fromkeys([int(x) for x in pos if int(x) != 0]))
-    neg = [-x for x in pos]
+    if Bipolar_toggle.value:
+        neg = [-x for x in pos]
+    else:
+        neg = []
 
     if order == "positive_then_negative":
         return pos + neg
@@ -775,7 +784,6 @@ def estimate_ion_mobility_ratio_for_scan(g_scan, temp=293.15, press=101325):
     Rp = m["R_pos"].to_numpy(dtype=float)
     Rn = m["R_neg"].to_numpy(dtype=float)
 
-    # start from largest-size peak
     start = np.argmax(Rp + Rn)
 
     for i in range(start, len(dp)):
@@ -784,14 +792,12 @@ def estimate_ion_mobility_ratio_for_scan(g_scan, temp=293.15, press=101325):
 
         dp_i_m = dp[i] * 1e-9
 
-        # singly charged mobility at dp_i
         mob_i = (
             1.602176634e-19
             * ctl.HV.cunningham_correction(dp_i_m, T=temp, P=press)
             / (3 * np.pi * 1.81e-5 * dp_i_m)
         )
 
-        # doubly charged contaminant: same mobility => particle mobility is half
         dp_g_m = inv.min_mob(np.array([0.5 * mob_i]), temp, press)[0]
         dp_g_nm = dp_g_m * 1e9
 
@@ -1065,7 +1071,8 @@ for widget in [
     sleep_time,
     n_scans_plot,
     settling_time,
-     polarity_switch_time,
+    polarity_switch_time,
+    Bipolar_toggle,
 ]:
     widget.param.watch(on_scan_setting_change, "value")
 
@@ -1106,5 +1113,5 @@ pn.serve(
     address="0.0.0.0",
     port=5006,
     show=False,
-    websocket_origin=["100.77.46.12:5006", "100.104.173.10:5006", "100.104.216.3:5006", "localhost:5006"],
+    websocket_origin=["100.77.46.12:5006", "100.104.173.10:5006", "100.104.216.3:5006", "100.124.163.94:5006", "localhost:5006"],
 )
