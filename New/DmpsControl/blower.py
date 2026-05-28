@@ -11,7 +11,7 @@ class FlowController:
     def __init__(self, flowmeter, blower, flow_lpm=10):
         self.flowmeter = flowmeter
         self.blower = blower
-        self.pid = PID(0.005, 0.03, 0, setpoint=flow_lpm)
+        self.pid = PID(0.008, 0.015, 0, setpoint=flow_lpm)
         self.pid.output_limits = (0, 5)
         self.running = False
         self.out = 2.5
@@ -29,8 +29,9 @@ class FlowController:
     def loop(self):
         while self.running:
             self.flowmeter.step()
-            pv = self.flowmeter.get_flow()
-            self.out = self.pid(pv)
+            raw = self.flowmeter.get_flow()
+
+            self.out = self.pid(raw)
             self.blower.set_voltage(self.out)
             time.sleep(0.05)
 
@@ -44,3 +45,4 @@ if __name__ == "__main__":
 
     while True:
         time.sleep(1)
+

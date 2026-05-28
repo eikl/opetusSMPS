@@ -59,11 +59,14 @@ cpc_com_port = pn.widgets.TextInput(name="CPC COM port", value="/dev/ttyAMA0")
 start_button = pn.widgets.Toggle(name="Start measurement", button_type="success")
 init_button = pn.widgets.Button(name="Initialize hardware", button_type="primary")
 stop_button = pn.widgets.Button(name="Stop and zero HV", button_type="danger")
-Bipolar_toggle = pn.widgets.Toggle(name="Bipolar scan", button_type="primary", value=True)
+Bipolar_toggle = pn.widgets.Toggle(
+    name="Bipolar scan", button_type="primary", value=True
+)
 
 
-
-n_scans_plot = pn.widgets.IntInput(name="Number of completed scans to plot",value=3,step=1)
+n_scans_plot = pn.widgets.IntInput(
+    name="Number of completed scans to plot", value=3, step=1
+)
 
 range1 = pn.widgets.ArrayInput(
     name="Range 1 [min,max] nm",
@@ -82,9 +85,15 @@ sheath2 = pn.widgets.IntInput(name="Sheath 2 (L/min)", value=5, step=1)
 steps2 = pn.widgets.IntInput(name="Steps 2", value=20, step=1)
 
 meas_time = pn.widgets.IntInput(name="Measurement time per size (s)", value=15, step=1)
-sleep_time = pn.widgets.IntInput(name="Sleep time between measurements (s)", value=5, step=1)
-settling_time = pn.widgets.IntInput(name="Settling time between size changes (s) ", value=10, step=1)
-polarity_switch_time = pn.widgets.IntInput(name="Polarity switch time (s) ", value=0, step=1)
+sleep_time = pn.widgets.IntInput(
+    name="Sleep time between measurements (s)", value=5, step=1
+)
+settling_time = pn.widgets.IntInput(
+    name="Settling time between size changes (s) ", value=10, step=1
+)
+polarity_switch_time = pn.widgets.IntInput(
+    name="Polarity switch time (s) ", value=0, step=1
+)
 
 status_text = pn.pane.Markdown("Status: idle")
 last_row_pane = pn.pane.Str("Last measurement: -")
@@ -112,6 +121,7 @@ phase_start_time = time.time()
 scan_rows = []
 completed_scans = []
 scan_number = 0
+
 
 def ensure_settings_file():
     if not SETTINGS_FILE.exists():
@@ -168,17 +178,25 @@ def load_settings():
     meas_time.value = settings.get("meas_time", DEFAULT_SETTINGS["meas_time"])
     sleep_time.value = settings.get("sleep_time", DEFAULT_SETTINGS["sleep_time"])
     n_scans_plot.value = settings.get("n_scans_plot", DEFAULT_SETTINGS["n_scans_plot"])
-    Bipolar_toggle.value = settings.get("Bipolar_toggle", DEFAULT_SETTINGS["Bipolar_toggle"])
+    Bipolar_toggle.value = settings.get(
+        "Bipolar_toggle", DEFAULT_SETTINGS["Bipolar_toggle"]
+    )
 
-    settling_time.value = settings.get("settling_time", DEFAULT_SETTINGS["settling_time"])
-    polarity_switch_time.value = settings.get("polarity_switch_time", DEFAULT_SETTINGS["polarity_switch_time"])
+    settling_time.value = settings.get(
+        "settling_time", DEFAULT_SETTINGS["settling_time"]
+    )
+    polarity_switch_time.value = settings.get(
+        "polarity_switch_time", DEFAULT_SETTINGS["polarity_switch_time"]
+    )
+
 
 ensure_settings_file()
 load_settings()
 
+
 def bipolar_log_sizes(size_range_value, n, order="negative_then_positive"):
     global Bipolar_toggle
-    
+
     lo, hi = np.array(size_range_value).ravel().astype(float)
     lo, hi = abs(lo), abs(hi)
 
@@ -200,6 +218,7 @@ def bipolar_log_sizes(size_range_value, n, order="negative_then_positive"):
         return pos + neg
     return neg + pos
 
+
 def save_completed_scan(scan_rows, scan_number):
     if not scan_rows:
         return
@@ -213,7 +232,8 @@ def save_completed_scan(scan_rows, scan_number):
 
     pd.DataFrame(scan_rows).to_csv(path, index=False)
     print(f"Saved completed scan: {path}", flush=True)
-    
+
+
 def get_recent_completed_scans(n=None):
 
     if n is None:
@@ -225,8 +245,8 @@ def get_recent_completed_scans(n=None):
         return pd.DataFrame()
 
     csv_files = sorted(
-    root.glob("*/*.csv"),
-    key=lambda p: p.stem,
+        root.glob("*/*.csv"),
+        key=lambda p: p.stem,
     )[-n:]
 
     dfs = []
@@ -243,6 +263,7 @@ def get_recent_completed_scans(n=None):
 
     return pd.DataFrame()
 
+
 def load_initial_scans_to_table():
     df0 = get_recent_completed_scans(int(n_scans_plot.value))
     if df0 is not None and not df0.empty:
@@ -250,18 +271,24 @@ def load_initial_scans_to_table():
     else:
         print("No completed scans found on startup", flush=True)
 
+
 def get_scan_program():
     scan = []
 
     if int(steps1.value) > 1:
         for dp in bipolar_log_sizes(range1.value, int(steps1.value)):
-            scan.append({"scan_range": 1, "dp": int(dp), "sheath": float(sheath1.value)})
+            scan.append(
+                {"scan_range": 1, "dp": int(dp), "sheath": float(sheath1.value)}
+            )
 
     if int(steps2.value) > 2:
         for dp in bipolar_log_sizes(range2.value, int(steps2.value)):
-            scan.append({"scan_range": 2, "dp": int(dp), "sheath": float(sheath2.value)})
+            scan.append(
+                {"scan_range": 2, "dp": int(dp), "sheath": float(sheath2.value)}
+            )
 
     return scan
+
 
 def update_scan_preview():
     try:
@@ -270,6 +297,7 @@ def update_scan_preview():
         scan_pane.object = f"Scan points ({len(sizes)}): {sizes}"
     except Exception as e:
         scan_pane.object = f"Scan parse error: {e}"
+
 
 def stop_and_zero():
     global phase, current_size_index, phase_start_time
@@ -290,6 +318,7 @@ def stop_and_zero():
         ctl.HV.zero()
 
     status_text.object = "Status: stopped, HV zeroed"
+
 
 def init():
     global flowmeter, blower, flow_controller, cpc
@@ -312,11 +341,13 @@ def init():
     flow_controller.start()
     status_text.object = "Status: hardware initialized"
 
+
 def measurement_loop():
     while True:
         if measurement_running.is_set():
             measurement_step()
         time.sleep(float(sleep_time.value))
+
 
 def ensure_measurement_thread():
     global measurement_thread
@@ -324,11 +355,20 @@ def ensure_measurement_thread():
         measurement_thread = threading.Thread(target=measurement_loop, daemon=True)
         measurement_thread.start()
 
-polarity_switch=1
+
+polarity_switch = 1
 measurement_finished = True
 
+
 def measurement_step(debug=True):
-    global current_size_index, phase, phase_start_time, scan_number, latest_inversion_signature, polarity_switch, measurement_finished
+    global \
+        current_size_index, \
+        phase, \
+        phase_start_time, \
+        scan_number, \
+        latest_inversion_signature, \
+        polarity_switch, \
+        measurement_finished
 
     if not start_button.value:
         return
@@ -362,21 +402,22 @@ def measurement_step(debug=True):
 
             flow_controller.setpoint(q_sheath)
             ctl.HV.voltage_set(dp, Q_sh_lpm=q_sheath)
-            
+
             if np.sign(dp) == polarity_switch:
                 time.sleep(float(polarity_switch_time.value))
                 polarity_switch = polarity_switch * -1
-                phase_start_time = time.time()
-                
+
             if measurement_finished:
                 time.sleep(float(settling_time.value))
                 measurement_finished = False
-                phase_start_time = now
+                phase_start_time = time.time()
 
             cpc_count = cpc.read_instrument()
             flow = flowmeter.get_flow()
 
-            local_log = Path("logs") / f"measurement_{datetime.now().strftime('%Y%m%d')}.csv"
+            local_log = (
+                Path("logs") / f"measurement_{datetime.now().strftime('%Y%m%d')}.csv"
+            )
 
             row = {
                 "time": datetime.now().isoformat(),
@@ -404,7 +445,6 @@ def measurement_step(debug=True):
                 )
             else:
                 last_row_pane.object = str(row)
-                        
 
             if now - phase_start_time >= meas_sec:
                 phase_start_time = now
@@ -412,8 +452,7 @@ def measurement_step(debug=True):
                 measurement_finished = True
                 if current_size_index >= len(scan):
                     current_size_index = 0
-    
-                    
+
                     scan_number += 1
 
                     save_completed_scan(scan_rows, scan_number)
@@ -465,7 +504,6 @@ def log_row(row, local_log, cloud_log=None):
             status_text.object = f"Cloud log failed, local OK: {e}"
 
 
-
 def on_start_change(event):
     global phase, phase_start_time, current_size_index
 
@@ -484,7 +522,8 @@ def on_start_change(event):
         measurement_running.clear()
         status_text.object = "Status: stopped"
 
-def invert_one_scan(d, polarity, scan_range, zratio = None, temp=293.15, press=101325):
+
+def invert_one_scan(d, polarity, scan_range, zratio=None, temp=293.15, press=101325):
     d = d.copy()
     d["cpc_float"] = pd.to_numeric(d["cpc_count"], errors="coerce")
     d["abs_size_nm"] = d["size_nm"].abs()
@@ -522,26 +561,37 @@ def invert_one_scan(d, polarity, scan_range, zratio = None, temp=293.15, press=1
             dp_nm if polarity == "positive" else -dp_nm,
             Q_sh_lpm=q_sheath,
         )
-        
+
         if zratio is None or not np.isfinite(zratio):
             zratio = 1.35e-4 / 1.60e-4
 
-        
         Zn = 1e-4
         Zp = zratio * Zn
-        
+
         args = (
-            temp, press, p, voltage,
-            dma.L, dma.r2, dma.r1,
-            qa, qc, qm, qs,
-            1.0, qa, 1,
-            Zp, Zn,
-            140, 101,
-            1e13, 1e13,
+            temp,
+            press,
+            p,
+            voltage,
+            dma.L,
+            dma.r2,
+            dma.r1,
+            qa,
+            qc,
+            qm,
+            qs,
+            1.0,
+            qa,
+            1,
+            Zp,
+            Zn,
+            140,
+            101,
+            1e13,
+            1e13,
             "gunn woessner mod",
             0,
         )
-        
 
         for j in range(len(dp_grid_nm)):
             a = limits[j]
@@ -551,10 +601,12 @@ def invert_one_scan(d, polarity, scan_range, zratio = None, temp=293.15, press=1
 
     x, rnorm = nnls(A, y)
 
-    return pd.DataFrame({
-        "abs_size_nm": dp_grid_nm,
-        "N_GWalpha": x,
-    })
+    return pd.DataFrame(
+        {
+            "abs_size_nm": dp_grid_nm,
+            "N_GWalpha": x,
+        }
+    )
 
 
 def make_plot(df):
@@ -564,7 +616,9 @@ def make_plot(df):
         return pn.pane.Markdown("No data")
 
     if df is None or df.empty:
-        df = pd.DataFrame(columns=["time", "size_nm", "cpc_count", "sheath_setpoint", "sheath_flow"])
+        df = pd.DataFrame(
+            columns=["time", "size_nm", "cpc_count", "sheath_setpoint", "sheath_flow"]
+        )
     else:
         df = df.copy()
 
@@ -670,8 +724,7 @@ def make_plot(df):
                 row=4,
                 col=1,
             )
-            
-            
+
             sizes = merged["abs_size_nm"].to_numpy()
             cpc_pos = merged["cpc_pos"].to_numpy()
             cpc_neg = merged["cpc_neg"].to_numpy()
@@ -687,7 +740,9 @@ def make_plot(df):
                     q, sizes, cpc_pos, cpc_neg, use_mod=False
                 )
 
-                charge_fractions[f"Wiedensohler q{q}"] =ctl.Chargefraction.wiedensohler(q, sizes)
+                charge_fractions[f"Wiedensohler q{q}"] = (
+                    ctl.Chargefraction.wiedensohler(q, sizes)
+                )
 
             for label, charge_fraction in charge_fractions.items():
                 fig.add_scatter(
@@ -698,7 +753,6 @@ def make_plot(df):
                     row=5,
                     col=1,
                 )
-            
 
     fig.update_xaxes(title_text="|dp| (nm)", row=4, col=1)
 
@@ -733,8 +787,6 @@ def make_plot(df):
     )
 
 
-
-
 def _scan_signature(df2):
     if df2 is None or df2.empty:
         return None
@@ -745,6 +797,7 @@ def _scan_signature(df2):
     nplot = int(n_scans_plot.value)
 
     return (nrows, scan_ids, tmax, nplot)
+
 
 def _size_axis_for_range(scan_range):
     sizes = sorted(
@@ -763,11 +816,7 @@ def estimate_ion_mobility_ratio_for_scan(g_scan, temp=293.15, press=101325):
     d["abs_size_nm"] = d["size_nm"].abs()
     d["polarity"] = np.where(d["size_nm"] > 0, "pos", "neg")
 
-    grouped = (
-        d.groupby(["abs_size_nm", "polarity"])["cpc_float"]
-        .mean()
-        .reset_index()
-    )
+    grouped = d.groupby(["abs_size_nm", "polarity"])["cpc_float"].mean().reset_index()
 
     pos = grouped[grouped["polarity"] == "pos"].rename(columns={"cpc_float": "R_pos"})
     neg = grouped[grouped["polarity"] == "neg"].rename(columns={"cpc_float": "R_neg"})
@@ -823,6 +872,7 @@ def estimate_ion_mobility_ratio_for_scan(g_scan, temp=293.15, press=101325):
 
     return np.nan, np.nan
 
+
 def compute_inversion_heatmap(df2):
     df2 = df2.copy()
     df2["abs_size_nm"] = df2["size_nm"].abs()
@@ -831,7 +881,7 @@ def compute_inversion_heatmap(df2):
 
     traces = []
     ntot_traces = []
-    
+
     ion_x = []
     ion_y = []
     ion_dp = []
@@ -840,7 +890,7 @@ def compute_inversion_heatmap(df2):
     group_key = "scan_id" if "scan_id" in df2.columns else "scan_number"
     size_axis = sorted(set(abs(x["dp"]) for x in get_scan_program()))
     size_axis = np.asarray(size_axis, dtype=float)
-    
+
     for sn, g_scan in df2.groupby(group_key):
         zratio, selected_dp = estimate_ion_mobility_ratio_for_scan(g_scan)
 
@@ -858,20 +908,17 @@ def compute_inversion_heatmap(df2):
         heat_times = []
         ntot_vals = []
 
-
         for sn, g_scan in dd_pol.groupby(group_key):
             zratio = scan_zratios.get(sn, np.nan)
-            
+
             scan_parts = []
             ntot_scan = 0.0
-
 
             for scan_range, g in g_scan.groupby("scan_range"):
                 invdf = invert_one_scan(g, polarity, scan_range, zratio=zratio)
 
                 dp_inv = invdf["abs_size_nm"].to_numpy(dtype=float)
                 n_inv = invdf["N_GWalpha"].to_numpy(dtype=float)
-
 
                 ntot_scan += trapezoid(n_inv, np.log(dp_inv))
 
@@ -881,54 +928,58 @@ def compute_inversion_heatmap(df2):
             full_col = np.full(len(size_axis), np.nan)
 
             for dp_inv, n_inv in scan_parts:
-                mask = (size_axis >= np.nanmin(dp_inv)) & (size_axis <= np.nanmax(dp_inv))
+                mask = (size_axis >= np.nanmin(dp_inv)) & (
+                    size_axis <= np.nanmax(dp_inv)
+                )
                 full_col[mask] = np.interp(
                     np.log10(size_axis[mask]),
                     np.log10(dp_inv),
                     n_inv,
                 )
-                
 
             heat_cols.append(full_col)
             heat_times.append(g_scan["time"].median())
             ntot_vals.append(ntot_scan)
 
-
         if not heat_cols:
             continue
 
-        
-        
         Z = np.column_stack(heat_cols)
 
-        traces.append({
-            "kind": "heatmap",
-            "polarity": polarity,
-            "scan_range": "all",
-            "row": row,
-            "Z": Z,
-            "x": heat_times,
-            "y": size_axis,
-            "name": f"{polarity} inverted",
-        })
+        traces.append(
+            {
+                "kind": "heatmap",
+                "polarity": polarity,
+                "scan_range": "all",
+                "row": row,
+                "Z": Z,
+                "x": heat_times,
+                "y": size_axis,
+                "name": f"{polarity} inverted",
+            }
+        )
 
-        ntot_traces.append({
-            "kind": "ntot",
-            "polarity": polarity,
-            "row": 9,
-            "x": heat_times,
-            "y": ntot_vals,
-            "name": f"Ntot GW {polarity}",
-        })
+        ntot_traces.append(
+            {
+                "kind": "ntot",
+                "polarity": polarity,
+                "row": 9,
+                "x": heat_times,
+                "y": ntot_vals,
+                "name": f"Ntot GW {polarity}",
+            }
+        )
 
-    traces.append({
+    traces.append(
+        {
             "kind": "ion_ratio",
             "row": 8,
             "x": ion_x,
             "y": ion_y,
             "selected_dp": ion_dp,
             "name": "Ion mobility ratio Z+/Z-",
-        })
+        }
+    )
 
     return traces + ntot_traces
 
@@ -949,7 +1000,7 @@ def start_inversion_job(df2):
     print("Starting background inversion", flush=True)
 
     fut = inversion_executor.submit(compute_inversion_heatmap, df2.copy())
-    
+
     def done_callback(fut):
         global latest_inversion, latest_inversion_signature, inversion_running
 
@@ -986,17 +1037,18 @@ def add_cached_heatmaps(fig):
                 y=tr["y"],
                 zmin=0,
                 zmax=20000,
-                colorbar=dict(title=f'{tr["polarity"]}'),
+                colorbar=dict(title=f"{tr['polarity']}"),
                 name=tr["name"],
                 row=tr["row"],
                 col=1,
             )
 
             fig.update_yaxes(type="log", title_text="dp (nm)", row=tr["row"], col=1)
-            fig.update_xaxes(title_text="Time", tickformat="%H:%M", row=tr["row"], col=1)
+            fig.update_xaxes(
+                title_text="Time", tickformat="%H:%M", row=tr["row"], col=1
+            )
 
         elif tr["kind"] == "ntot":
-            
             fig.add_scatter(
                 x=tr["x"],
                 y=tr["y"],
@@ -1005,12 +1057,10 @@ def add_cached_heatmaps(fig):
                 row=9,
                 col=1,
             )
-            
-        
 
             fig.update_yaxes(title_text="Ntot", row=9, col=1)
             fig.update_xaxes(title_text="Time", tickformat="%H:%M", row=9, col=1)
-            
+
         elif tr["kind"] == "ion_ratio":
             y = np.clip(tr["y"], 0.5, 2.0)
             fig.add_scatter(
@@ -1036,6 +1086,7 @@ plot_box = pn.Column(
     scroll=False,
 )
 
+
 def startup_load():
     df0 = get_recent_completed_scans(int(n_scans_plot.value))
 
@@ -1055,11 +1106,14 @@ def startup_load():
     else:
         print("No startup scans found", flush=True)
 
+
 pn.state.onload(startup_load)
+
 
 def on_scan_setting_change(event):
     save_settings()
     update_scan_preview()
+
 
 for widget in [
     cpc_com_port,
@@ -1086,7 +1140,6 @@ update_scan_preview()
 
 #### Layout ####
 layout = pn.Column(
-    
     "# DMA / CPC Control GUI",
     pn.Row(cpc_com_port),
     "# CPC / DMA control panel",
@@ -1115,5 +1168,11 @@ pn.serve(
     address="0.0.0.0",
     port=5006,
     show=False,
-    websocket_origin=["100.77.46.12:5006", "100.104.173.10:5006", "100.104.216.3:5006", "100.124.163.94:5006", "localhost:5006"],
+    websocket_origin=[
+        "100.77.46.12:5006",
+        "100.104.173.10:5006",
+        "100.104.216.3:5006",
+        "100.124.163.94:5006",
+        "localhost:5006",
+    ],
 )
