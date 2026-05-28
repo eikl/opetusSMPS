@@ -9,8 +9,10 @@ from datetime import datetime
 from plotly.subplots import make_subplots
 import threading
 import traceback
-from scipy.integrate import quad, trapezoid
 from scipy.optimize import nnls
+from numpy.polynomial.legendre import leggauss
+
+_GL_NODES, _GL_WEIGHTS = leggauss(5)
 from concurrent.futures import ThreadPoolExecutor
 from types import SimpleNamespace
 
@@ -257,6 +259,12 @@ def invert_one_scan(d, polarity, scan_range, zratio=None, temp=293.15, press=101
     limits[1:-1] = 0.5 * (ldp[1:] + ldp[:-1])
     limits[-1] = ldp[-1] + (ldp[-1] - ldp[-2]) / 2
 
+    # Precompute GL quadrature points for all grid cells (shape: n_grid × n_GL)
+    mids = 0.5 * (limits[:-1] + limits[1:])
+    halfs = 0.5 * (limits[1:] - limits[:-1])
+    # pts[j, k] = k-th GL node mapped into cell j; ravel to pass as one array
+    gl_pts = (mids[:, None] + halfs[:, None] * _GL_NODES[None, :]).ravel()
+
     dma = SimpleNamespace(L=0.28, r1=0.025, r2=0.033)
     A = np.zeros((len(dp_meas_nm), len(dp_grid_nm)))
 
@@ -271,17 +279,17 @@ def invert_one_scan(d, polarity, scan_range, zratio=None, temp=293.15, press=101
     else:
         p = np.arange(1, 6, 1, dtype=float)
 
+    if zratio is None or not np.isfinite(zratio):
+        zratio = 1.35e-4 / 1.60e-4
+
+    Zn = 1e-4
+    Zp = zratio * Zn
+
     for i, dp_nm in enumerate(dp_meas_nm):
         voltage = voltage_from_size(
             dp_nm if polarity == "positive" else -dp_nm,
             Q_sh_lpm=q_sheath,
         )
-
-        if zratio is None or not np.isfinite(zratio):
-            zratio = 1.35e-4 / 1.60e-4
-
-        Zn = 1e-4
-        Zp = zratio * Zn
 
         args = (
             temp,
@@ -308,11 +316,11 @@ def invert_one_scan(d, polarity, scan_range, zratio=None, temp=293.15, press=101
             0,
         )
 
-        for j in range(len(dp_grid_nm)):
-            a = limits[j]
-            b = limits[j + 1]
-            val, _ = quad(inv.intfun, a, b, args=args, limit=50)
-            A[i, j] = val / (b - a)
+        # Single vectorized call over all grid cells × GL nodes
+        vals = inv.intfun(gl_pts, *args).reshape(len(dp_grid_nm), len(_GL_NODES))
+        # Gauss-Legendre: integral over [a,b] = (b-a)/2 * dot(weights, f)
+        # divided by (b-a) for the normalised kernel → just 0.5 * dot
+        A[i, :] = 0.5 * vals @ _GL_WEIGHTS
 
     x, rnorm = nnls(A, y)
 

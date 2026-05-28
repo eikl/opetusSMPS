@@ -41,10 +41,8 @@ def teearra(p, dp, t, press, voltage, pituus, arkaksi, aryksi, qa, qc, qm, qs):
     zetap = 4.0 * voltage * np.pi * pituus * zeta / ((qm + qc) * np.log(aryksi / arkaksi))
 
     # Diffusion broadening parameter; shape (n_dp, n_p)
-    rhota = np.zeros((len(dp), len(p)))
     diffusion_factor = gabeta * np.log(aryksi / arkaksi) * sc.Boltzmann * t / (sc.elementary_charge * voltage)
-    for i in range(len(p)):
-        rhota[:, i] = np.sqrt((zetap[:, i] / p[i]) * diffusion_factor)
+    rhota = np.sqrt((zetap / p) * diffusion_factor)
 
     def epsilon(x):
         # epsilon.m: e = -x*(1 - erf(x)) + (1/sqrt(pi))*exp(-x^2)
