@@ -4,6 +4,9 @@ import serial
 import time
 import smbus2
 from smbus2 import i2c_msg
+import pigpio
+from gpiozero import OutputDevice
+
 class CPC:
     def __init__(self, port):
         self.ser = serial.Serial(
@@ -91,6 +94,55 @@ class Flowmeter:
 
 
 
+
+class InletSwitchMosfet:
+    def __init__(
+        self,
+        pwm_pin=18,
+        pwm_freq=1000,
+        kick_time=0.3,
+        hold_duty=180,
+    ):
+        self.pi = pigpio.pi()
+
+        if not self.pi.connected:
+            raise RuntimeError("pigpio daemon not running")
+
+        self.pwm_pin = pwm_pin
+        self.kick_time = kick_time
+        self.hold_duty = hold_duty
+
+        self.pi.set_mode(self.pwm_pin, pigpio.OUTPUT)
+        self.pi.set_PWM_frequency(self.pwm_pin, pwm_freq)
+
+        self.valveoff()
+
+    def valveon(self):
+        self.pi.set_PWM_dutycycle(self.pwm_pin, 255)
+
+        time.sleep(self.kick_time)
+
+        self.pi.set_PWM_dutycycle(
+            self.pwm_pin,
+            self.hold_duty,
+        )
+
+    def valveoff(self):
+        self.pi.set_PWM_dutycycle(self.pwm_pin, 0)
+
+    def cleanup(self):
+        self.valveoff()
+        self.pi.stop()
+        
+class DacOut:
+    def __init__(self, pin=17):
+        self.sw = OutputDevice(pin, initial_value=0)
+
+    def allow(self):
+        self.sw.value = 1
+
+    def block(self):
+        self.sw.value = 0
 
 
 class BlowerDAC:
