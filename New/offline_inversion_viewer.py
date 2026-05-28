@@ -9,8 +9,11 @@ import numpy as np
 import pandas as pd
 import panel as pn
 from plotly.subplots import make_subplots
-from scipy.integrate import quad, trapezoid
+from scipy.integrate import trapezoid
 from scipy.optimize import nnls
+from numpy.polynomial.legendre import leggauss
+
+_GL_NODES, _GL_WEIGHTS = leggauss(5)
 
 import inv_funcs as inv
 
@@ -506,6 +509,10 @@ def invert_one_scan(d, polarity, zratio=None, temp=293.15, press=101325):
     limits[1:-1] = 0.5 * (ldp[1:] + ldp[:-1])
     limits[-1] = ldp[-1] + (ldp[-1] - ldp[-2]) / 2
 
+    mids = 0.5 * (limits[:-1] + limits[1:])
+    halfs = 0.5 * (limits[1:] - limits[:-1])
+    gl_pts = (mids[:, None] + halfs[:, None] * _GL_NODES[None, :]).ravel()
+
     dma = get_dma()
     A = np.zeros((len(dp_meas_nm), len(dp_grid_nm)))
 
@@ -547,11 +554,8 @@ def invert_one_scan(d, polarity, zratio=None, temp=293.15, press=101325):
             0,
         )
 
-        for j in range(len(dp_grid_nm)):
-            a = limits[j]
-            b = limits[j + 1]
-            val, _ = quad(inv.intfun, a, b, args=args, limit=50)
-            A[i, j] = val / (b - a)
+        vals = inv.intfun(gl_pts, *args).reshape(len(dp_grid_nm), len(_GL_NODES))
+        A[i, :] = 0.5 * vals @ _GL_WEIGHTS
 
     x, _ = nnls(A, y)
 
