@@ -31,6 +31,7 @@ DEFAULT_SETTINGS = {
     "settling_time": 10,
     "polarity_switch_time": 0,
     "Bipolar_toggle": True,
+    "Ntot_time": 60,
 }
 
 inversion_executor = ThreadPoolExecutor(max_workers=1)
@@ -47,6 +48,8 @@ flowmeter = None
 blower = None
 flow_controller = None
 cpc = None
+inletValve = None
+dac = None
 
 measurement_running = threading.Event()
 measurement_thread = None
@@ -84,10 +87,12 @@ range2 = pn.widgets.ArrayInput(
 sheath2 = pn.widgets.IntInput(name="Sheath 2 (L/min)", value=5, step=1)
 steps2 = pn.widgets.IntInput(name="Steps 2", value=20, step=1)
 
+
 meas_time = pn.widgets.IntInput(name="Measurement time per size (s)", value=15, step=1)
 sleep_time = pn.widgets.IntInput(
     name="Sleep time between measurements (s)", value=5, step=1
 )
+Ntot_time = pn.widgets.IntInput(name="Ntot measurement time (s)", value=60, step=1)
 settling_time = pn.widgets.IntInput(
     name="Settling time between size changes (s) ", value=10, step=1
 )
@@ -148,6 +153,7 @@ def save_settings():
         "settling_time": int(settling_time.value),
         "polarity_switch_time": int(polarity_switch_time.value),
         "Bipolar_toggle": bool(Bipolar_toggle.value),
+        "Ntot_time": int(Ntot_time.value),
     }
 
     with open(SETTINGS_FILE, "w") as f:
@@ -188,7 +194,7 @@ def load_settings():
     polarity_switch_time.value = settings.get(
         "polarity_switch_time", DEFAULT_SETTINGS["polarity_switch_time"]
     )
-
+    Ntot_time.value = settings.get("Ntot_time", DEFAULT_SETTINGS["Ntot_time"])
 
 ensure_settings_file()
 load_settings()
@@ -300,38 +306,52 @@ def update_scan_preview():
 
 
 def stop_and_zero():
-    global phase, current_size_index, phase_start_time
+    global phase, current_size_index, phase_start_time, dac
 
     measurement_running.clear()
 
     if start_button.value:
         start_button.value = False
+        
+    try:
+        if inletValve is not None:
+            inletValve.valveoff()
+    except Exception:
+        pass
 
     phase = "idle"
     current_size_index = 0
     phase_start_time = time.time()
 
     try:
+        dac.block()
         ctl.HV.zero()
     except OSError:
         ctl.setup()
+        dac.block()
         ctl.HV.zero()
 
     status_text.object = "Status: stopped, HV zeroed"
 
 
 def init():
-    global flowmeter, blower, flow_controller, cpc
+    global flowmeter, blower, flow_controller, cpc, inletValve, dac
 
     if flow_controller is not None:
         return
 
+    dac = ctl.DacOut()
+    dac.block()
     flowmeter = ctl.Flowmeter()
     blower = ctl.BlowerDAC()
     cpc = ctl.CPC(cpc_com_port.value)
+    inletValve = ctl.InletSwitchMosfet()
 
+    
     ctl.setup()
     ctl.HV.zero()
+    time.sleep(0.3)
+    dac.allow()
 
     flow_controller = ctl.blower.FlowController(
         flowmeter,
@@ -346,7 +366,7 @@ def measurement_loop():
     while True:
         if measurement_running.is_set():
             measurement_step()
-        time.sleep(float(sleep_time.value))
+        time.sleep(0.05)
 
 
 def ensure_measurement_thread():
@@ -358,7 +378,51 @@ def ensure_measurement_thread():
 
 polarity_switch = 1
 measurement_finished = True
+Ntot = False
 
+def run_ntot_measurement(scan_range, scan_number, q_sheath):
+    global inletValve
+    if inletValve is None:
+        return []
+
+    ntot_rows = []
+
+    ctl.HV.zero()
+    inletValve.valveon()
+    dp=0
+
+    time.sleep(float(settling_time.value))
+
+    t_start = time.time()
+
+    while time.time() - t_start < float(Ntot_time.value):
+        cpc_count = cpc.read_instrument()
+        flow = flowmeter.get_flow()
+
+        row = {
+                "time": datetime.now().isoformat(),
+                "scan_range": scan_range,
+                "size_nm": dp,
+                "cpc_count": cpc_count,
+                "sheath_flow": flow,
+                "sheath_setpoint": q_sheath,
+                "scan_number": scan_number,
+                "Ntot": True,
+            }
+
+        print(row, flush=True)
+        rows.append(row)
+        ntot_rows.append(row)
+
+        local_log = Path("logs") / f"measurement_{datetime.now().strftime('%Y%m%d')}.csv"
+        log_row(row, local_log=local_log, cloud_log=None)
+
+        time.sleep(float(sleep_time.value))
+
+    inletValve.valveoff()
+    time.sleep(float(settling_time.value))
+
+    return ntot_rows
 
 def measurement_step(debug=True):
     global \
@@ -368,7 +432,9 @@ def measurement_step(debug=True):
         scan_number, \
         latest_inversion_signature, \
         polarity_switch, \
-        measurement_finished
+        measurement_finished, \
+        Ntot,\
+        inletValve
 
     if not start_button.value:
         return
@@ -383,6 +449,8 @@ def measurement_step(debug=True):
 
     now = time.time()
     meas_sec = float(meas_time.value)
+    
+  
 
     try:
         if phase == "idle":
@@ -427,6 +495,7 @@ def measurement_step(debug=True):
                 "sheath_flow": flow,
                 "sheath_setpoint": q_sheath,
                 "scan_number": scan_number,
+                "Ntot": False,
             }
 
             if debug:
@@ -452,14 +521,22 @@ def measurement_step(debug=True):
                 measurement_finished = True
                 if current_size_index >= len(scan):
                     current_size_index = 0
+                    Ntot = True
 
                     scan_number += 1
+                    Ntot_rows = run_ntot_measurement(scan_range, scan_number, q_sheath)
+                    scan_rows.extend(Ntot_rows)
 
                     save_completed_scan(scan_rows, scan_number)
                     with inversion_lock:
                         latest_inversion_signature = None
                     df2 = get_recent_completed_scans(int(n_scans_plot.value))
-                    start_inversion_job(df2)
+                    if "Ntot" in df2.columns:
+                        df2_inv = df2[df2["Ntot"] == False].copy()
+                    else:
+                        df2_inv = df2[df2["size_nm"] != 0].copy()
+
+                    start_inversion_job(df2_inv)
                     completed_scans.append(pd.DataFrame(scan_rows.copy()))
 
                     scan_rows.clear()
@@ -478,6 +555,17 @@ def measurement_step(debug=True):
                 table_pane.value = latest_df
 
     except Exception as e:
+        try:
+            if inletValve is not None:
+                inletValve.valveoff()
+        except Exception:
+            pass
+
+        try:
+            if dac is not None:
+                dac.block()
+        except Exception:
+            pass
         traceback.print_exc()
         status_text.object = f"Measurement error: {e}"
         print(f"Measurement error: {e}", flush=True)
@@ -1129,6 +1217,7 @@ for widget in [
     settling_time,
     polarity_switch_time,
     Bipolar_toggle,
+    Ntot_time,
 ]:
     widget.param.watch(on_scan_setting_change, "value")
 
@@ -1149,7 +1238,7 @@ layout = pn.Column(
     "### Scan range 2",
     pn.Row(range2, sheath2, steps2),
     scan_pane,
-    pn.Row(meas_time, sleep_time, n_scans_plot, settling_time, polarity_switch_time),
+    pn.Row(meas_time, sleep_time, Ntot_time, n_scans_plot, settling_time, polarity_switch_time),
     "### Live data",
     last_row_pane,
     table_pane,
