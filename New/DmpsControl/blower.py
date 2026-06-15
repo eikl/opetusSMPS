@@ -28,12 +28,16 @@ class FlowController:
 
     def loop(self):
         while self.running:
-            self.flowmeter.step()
-            raw = self.flowmeter.get_flow()
+            try:
+                self.flowmeter.step()
+                raw = self.flowmeter.get_flow()
+                self.out = self.pid(raw)
+                self.blower.set_voltage(self.out)
+            except OSError as e:
+                print(f"Flowmeter I2C error: {e}", flush=True)
+                time.sleep(0.5)
 
-            self.out = self.pid(raw)
-            self.blower.set_voltage(self.out)
-            time.sleep(0.05)
+            time.sleep(0.1)
 
 
 if __name__ == "__main__":

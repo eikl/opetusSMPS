@@ -79,13 +79,18 @@ class Flowmeter:
         return (msb << 8) | lsb
 
     def start_measurement(self):
-        self.write_command(0x1000)
-        time.sleep(0.01)
+        for i in range(5):
+            try:
+                self.write_cmmand(0x1000)
+                time.sleep(0.1)
+                return
+            except OSError as e:
+                print(f"SFM3000 start failed {i+1}/5: {e}", flush=True)
+                time.sleep(0.2)
+        raise
 
     def step(self):
-        self.start_measurement()
         raw = self.read_word()
-
         self.flow = (raw - OFFSET) / SCALE_FACTOR
 
     def get_flow(self):
@@ -95,23 +100,12 @@ class Flowmeter:
 class InletSwitchMosfet:
     def __init__(
         self,
-        pwm_pin=18,
-        pwm_freq=1000,
-        kick_time=0.3,
-        hold_duty=0.7,  
+        pin=17,
     ):
-        self.valve = PWMOutputDevice(
-            pwm_pin,
-            frequency=pwm_freq,
-            initial_value=0,
-        )
-        self.kick_time = kick_time
-        self.hold_duty = hold_duty
+        self.valve = OutputDevice(pin, initial_value=0)
 
     def valveon(self):
         self.valve.on()
-        time.sleep(self.kick_time)
-        self.valve.value = self.hold_duty
 
     def valveoff(self):
         self.valve.off()
@@ -121,7 +115,7 @@ class InletSwitchMosfet:
         self.valve.close()
         
 class DacOut:
-    def __init__(self, pin=17):
+    def __init__(self, pin=18):
         self.sw = OutputDevice(pin, initial_value=0)
 
     def allow(self):

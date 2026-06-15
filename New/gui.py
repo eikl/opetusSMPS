@@ -389,7 +389,7 @@ def run_ntot_measurement(scan_range, scan_number, q_sheath):
 
     ctl.HV.zero()
     inletValve.valveon()
-    dp=0
+    dp=1
 
     time.sleep(float(settling_time.value))
 
