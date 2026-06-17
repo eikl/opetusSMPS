@@ -81,7 +81,7 @@ class Flowmeter:
     def start_measurement(self):
         for i in range(5):
             try:
-                self.write_cmmand(0x1000)
+                self.write_command(0x1000)
                 time.sleep(0.1)
                 return
             except OSError as e:

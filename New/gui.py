@@ -313,22 +313,22 @@ def stop_and_zero():
     if start_button.value:
         start_button.value = False
         
-    try:
+    '''try:
         if inletValve is not None:
             inletValve.valveoff()
     except Exception:
-        pass
+        pass'''
 
     phase = "idle"
     current_size_index = 0
     phase_start_time = time.time()
 
     try:
-        dac.block()
+        #dac.block()
         ctl.HV.zero()
     except OSError:
         ctl.setup()
-        dac.block()
+        #dac.block()
         ctl.HV.zero()
 
     status_text.object = "Status: stopped, HV zeroed"
@@ -340,18 +340,18 @@ def init():
     if flow_controller is not None:
         return
 
-    dac = ctl.DacOut()
-    dac.block()
+    #dac = ctl.DacOut()
+    #dac.block()
     flowmeter = ctl.Flowmeter()
     blower = ctl.BlowerDAC()
     cpc = ctl.CPC(cpc_com_port.value)
-    inletValve = ctl.InletSwitchMosfet()
+    #inletValve = ctl.InletSwitchMosfet()
 
     
     ctl.setup()
     ctl.HV.zero()
     time.sleep(0.3)
-    dac.allow()
+    #dac.allow()
 
     flow_controller = ctl.blower.FlowController(
         flowmeter,
@@ -381,14 +381,14 @@ measurement_finished = True
 Ntot = False
 
 def run_ntot_measurement(scan_range, scan_number, q_sheath):
-    global inletValve
+    '''global inletValve
     if inletValve is None:
-        return []
+        return []'''
 
     ntot_rows = []
 
     ctl.HV.zero()
-    inletValve.valveon()
+    #inletValve.valveon()
     dp=1
 
     time.sleep(float(settling_time.value))
@@ -419,7 +419,7 @@ def run_ntot_measurement(scan_range, scan_number, q_sheath):
 
         time.sleep(float(sleep_time.value))
 
-    inletValve.valveoff()
+    #inletValve.valveoff()
     time.sleep(float(settling_time.value))
 
     return ntot_rows
@@ -433,8 +433,7 @@ def measurement_step(debug=True):
         latest_inversion_signature, \
         polarity_switch, \
         measurement_finished, \
-        Ntot,\
-        inletValve
+        Ntot
 
     if not start_button.value:
         return
@@ -555,17 +554,17 @@ def measurement_step(debug=True):
                 table_pane.value = latest_df
 
     except Exception as e:
-        try:
+        '''try:
             if inletValve is not None:
                 inletValve.valveoff()
         except Exception:
-            pass
+            pass'''
 
-        try:
+        '''try:
             if dac is not None:
                 dac.block()
         except Exception:
-            pass
+            pass'''
         traceback.print_exc()
         status_text.object = f"Measurement error: {e}"
         print(f"Measurement error: {e}", flush=True)
@@ -1262,6 +1261,7 @@ pn.serve(
         "100.104.173.10:5006",
         "100.104.216.3:5006",
         "100.124.163.94:5006",
+        "100.74.217.78:5006",
         "localhost:5006",
     ],
 )
