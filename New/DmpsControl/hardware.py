@@ -97,22 +97,28 @@ class Flowmeter:
         return self.flow
 
 
-class InletSwitchMosfet:
-    def __init__(
-        self,
-        pin=17,
-    ):
-        self.valve = OutputDevice(pin, initial_value=0)
+class PicoValve:
+    def __init__(self, port="/dev/ttyACM0", baudrate=115200):
+        self.ser = serial.Serial(port, baudrate, timeout=2)
+        time.sleep(2)
+        self.ser.reset_input_buffer()
 
-    def valveon(self):
-        self.valve.on()
+    def command(self, cmd):
+        self.ser.write((cmd + "\n").encode())
+        return self.ser.readline().decode().strip()
 
-    def valveoff(self):
-        self.valve.off()
+    def on(self):
+        return self.command("ON")
 
-    def cleanup(self):
-        self.valveoff()
-        self.valve.close()
+    def off(self):
+        return self.command("OFF")
+
+    def status(self):
+        return self.command("STATUS")
+
+    def close(self):
+        self.off()
+        self.ser.close()
         
 class DacOut:
     def __init__(self, pin=18):
@@ -157,10 +163,13 @@ class BlowerDAC:
         return self.voltage
 
 if __name__ == "__main__":
-    
-    inlet = InletSwitchMosfet()
-    while True:
-        inlet.valveon()
-        time.sleep(5)
-        inlet.valveoff()
-        time.sleep(5)
+    valve = PicoValve()
+    print("Turning valve ON...")
+    print(valve.on())
+    time.sleep(20)
+    print("Valve status:", valve.status())
+    print("Turning valve OFF...")
+    print(valve.off())
+    time.sleep(2)
+    print("Valve status:", valve.status())
+    valve.close()

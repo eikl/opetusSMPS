@@ -313,11 +313,11 @@ def stop_and_zero():
     if start_button.value:
         start_button.value = False
         
-    '''try:
+    try:
         if inletValve is not None:
-            inletValve.valveoff()
+            inletValve.off()
     except Exception:
-        pass'''
+        pass
 
     phase = "idle"
     current_size_index = 0
@@ -345,7 +345,7 @@ def init():
     flowmeter = ctl.Flowmeter()
     blower = ctl.BlowerDAC()
     cpc = ctl.CPC(cpc_com_port.value)
-    #inletValve = ctl.InletSwitchMosfet()
+    inletValve = ctl.PicoValve()
 
     
     ctl.setup()
@@ -381,14 +381,14 @@ measurement_finished = True
 Ntot = False
 
 def run_ntot_measurement(scan_range, scan_number, q_sheath):
-    '''global inletValve
+    global inletValve
     if inletValve is None:
-        return []'''
+        return []
 
     ntot_rows = []
 
     ctl.HV.zero()
-    #inletValve.valveon()
+    inletValve.on()
     dp=1
 
     time.sleep(float(settling_time.value))
@@ -420,6 +420,7 @@ def run_ntot_measurement(scan_range, scan_number, q_sheath):
         time.sleep(float(sleep_time.value))
 
     #inletValve.valveoff()
+    inletValve.off()
     time.sleep(float(settling_time.value))
 
     return ntot_rows
@@ -554,11 +555,11 @@ def measurement_step(debug=True):
                 table_pane.value = latest_df
 
     except Exception as e:
-        '''try:
+        try:
             if inletValve is not None:
-                inletValve.valveoff()
+                inletValve.off()
         except Exception:
-            pass'''
+            pass
 
         '''try:
             if dac is not None:
