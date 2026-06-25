@@ -7,18 +7,32 @@ from smbus2 import i2c_msg
 from gpiozero import OutputDevice, PWMOutputDevice
 
 class CPC:
-    def __init__(self, port):
-        self.ser = serial.Serial(
-            port=port,
-            baudrate=9600,
-            bytesize=serial.SEVENBITS,
-            parity=serial.PARITY_EVEN,
-            stopbits=serial.STOPBITS_ONE,
-            timeout=1
-        )
+    def __init__(self, port, CPC_type="3771"):
+        self.type = CPC_type
+        if CPC_type == "3771":
+            self.ser = serial.Serial(
+                port=port,
+                baudrate=9600,
+                bytesize=serial.SEVENBITS,
+                parity=serial.PARITY_EVEN,
+                stopbits=serial.STOPBITS_ONE,
+                timeout=1
+            )
+        elif CPC_type == "HY09":
+            self.ser = serial.Serial(
+                port=port,
+                baudrate=115200,
+                bytesize=serial.EIGHTBITS,
+                parity=serial.PARITY_EVEN,
+                stopbits=serial.STOPBITS_ONE,
+                timeout=1
+            )
 
     def read_instrument(self):
-        self.ser.write(b"RD\r")
+        if self.type == "3771":
+            self.ser.write(b"RD\r")
+        elif self.type == "HY09":
+            self.ser.write(b"RB\r")
         return self.ser.readline().decode("utf-8").strip()
 class HaukeDMA:
     def __init__(self):

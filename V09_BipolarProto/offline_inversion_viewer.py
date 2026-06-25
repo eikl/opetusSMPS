@@ -188,6 +188,7 @@ zratio_widget = pn.widgets.FloatInput(
     value=float(settings.get("zratio", DEFAULT_SETTINGS["zratio"])),
     step=0.01,
 )
+use_zratio_checkbox = pn.widgets.Checkbox(name="Use Zp/Zn from settings", value=False)
 
 heatmap_clip = pn.widgets.FloatInput(
     name="Heatmap clip",
@@ -489,7 +490,6 @@ def estimate_ion_mobility_ratio_for_scan(g_scan, temp=293.15, press=101325):
 
 def invert_one_scan(d, polarity, zratio=None, temp=293.15, press=101325):
     d = d.copy()
-    ntot = d[d["Ntot"] == True].copy()
     d = d[d["Ntot"] == False]
     d["cpc_float"] = pd.to_numeric(d["cpc_count"], errors="coerce")
     d["abs_size_nm"] = pd.to_numeric(d["size_nm"], errors="coerce").abs()
@@ -530,7 +530,7 @@ def invert_one_scan(d, polarity, zratio=None, temp=293.15, press=101325):
     else:
         p = np.arange(1, 6, 1, dtype=float)
 
-    if zratio is None or not np.isfinite(zratio):
+    if zratio is None or not np.isfinite(zratio) or use_zratio_checkbox.value:
         zratio = float(zratio_widget.value)
 
     zn = 1e-4
@@ -549,11 +549,11 @@ def invert_one_scan(d, polarity, zratio=None, temp=293.15, press=101325):
             temp, press, p, voltage,
             dma.L, dma.r2, dma.r1,
             qa, qc, qm, qs,
-            1.0, qa, 1,
+            2.55, qa, 1,
             zp, zn,
             140, 101,
             1e13, 1e13,
-            "gunn woessner mod",
+            "fuchs",
             0,
         )
 
@@ -574,7 +574,7 @@ def run_inversion_calculation(df):
     df["abs_size_nm"] = pd.to_numeric(df["size_nm"], errors="coerce").abs()
     df["polarity"] = np.where(df["size_nm"] > 0, "positive", "negative")
 
-    size_axis = get_scan_size_axis(df)
+    size_axis = get_scan_size_axis(df[df["Ntot"] == False])
     output = []
     ion_points = []
 
@@ -598,26 +598,18 @@ def run_inversion_calculation(df):
         heat_times = []
         ntot_vals = []
         ntot_measured = []
-        
-        output.append({
-                "kind": "ntot",
-                "polarity": polarity,
-                "x": heat_times,
-                "y": ntot_vals,
-                "y_measured": ntot_measured,
-            })
 
         for scan_id, g_scan in dd.groupby(group_key):
             zratio = zratios.get(scan_id, np.nan)
             scan_parts = []
             ntot_scan = 0.0
-            
-            ntot_rows = g_scan[g_scan["Ntot"] == True]
-            ntot_measured.append(ntot_rows["cpc_float"].mean())
-            
-   
+
+            ntot_rows = g_scan[g_scan["Ntot"] == True].copy()
+            ntot_rows["cpc_float"] = pd.to_numeric(ntot_rows["cpc_count"], errors="coerce")/2
+            measured_ntot = ntot_rows["cpc_float"].mean()
 
             for _, g_range in g_scan.groupby("scan_range"):
+                
                 invdf = invert_one_scan(
                     g_range,
                     polarity=polarity,
@@ -653,6 +645,7 @@ def run_inversion_calculation(df):
             heat_cols.append(full_col)
             heat_times.append(g_scan["time"].median())
             ntot_vals.append(ntot_scan)
+            ntot_measured.append(measured_ntot)
 
         if heat_cols:
             output.append({
@@ -668,6 +661,7 @@ def run_inversion_calculation(df):
                 "polarity": polarity,
                 "x": heat_times,
                 "y": ntot_vals,
+                "y_measured": ntot_measured,
             })
             
             
@@ -727,16 +721,17 @@ def plot_inversion_result(result):
                 col=1,
             )
 
-            fig.add_scatter(
-                x=tr["x"],
-                y=tr["y_measured"],
-                mode="markers",
-                marker_symbol="x",
-                marker_size=10,
-                name=f"Measured Ntot {tr['polarity']}",
-                row=3,
-                col=1,
-            )
+            if "y_measured" in tr:
+                fig.add_scatter(
+                    x=tr["x"],
+                    y=tr["y_measured"],
+                    mode="markers",
+                    marker_symbol="x",
+                    marker_size=10,
+                    name=f"Measured Ntot {tr['polarity']}",
+                    row=3,
+                    col=1,
+                )
             
 
         elif tr["kind"] == "ion_ratio":
@@ -839,7 +834,7 @@ layout = pn.Column(
     "### DMA / inversion settings",
     pn.Row(dma_L, dma_r1, dma_r2),
     pn.Row(qa_lpm, qs_lpm, temp_K, press_Pa),
-    pn.Row(zratio_widget, heatmap_clip),
+    pn.Row(zratio_widget, use_zratio_checkbox, heatmap_clip),
     pn.Row(plot_button, invert_button, status),
     "## Raw scans",
     raw_plot,

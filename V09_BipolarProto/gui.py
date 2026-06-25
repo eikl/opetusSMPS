@@ -32,6 +32,7 @@ DEFAULT_SETTINGS = {
     "polarity_switch_time": 0,
     "Bipolar_toggle": True,
     "Ntot_time": 60,
+    "CPC_type": "3771",
 }
 
 inversion_executor = ThreadPoolExecutor(max_workers=1)
@@ -58,6 +59,7 @@ pn.extension("plotly")
 
 #### Widgets ####
 cpc_com_port = pn.widgets.TextInput(name="CPC COM port", value="/dev/ttyAMA0")
+cpc_type = pn.widgets.Select(name="CPC Type", options=["3771", "HY09"], value="3771")
 
 start_button = pn.widgets.Toggle(name="Start measurement", button_type="success")
 init_button = pn.widgets.Button(name="Initialize hardware", button_type="primary")
@@ -154,6 +156,7 @@ def save_settings():
         "polarity_switch_time": int(polarity_switch_time.value),
         "Bipolar_toggle": bool(Bipolar_toggle.value),
         "Ntot_time": int(Ntot_time.value),
+        "CPC_type": str(cpc_type.value),
     }
 
     with open(SETTINGS_FILE, "w") as f:
@@ -172,6 +175,7 @@ def load_settings():
             settings = json.load(f)
 
     cpc_com_port.value = settings.get("cpc_com_port", DEFAULT_SETTINGS["cpc_com_port"])
+    cpc_type.value = settings.get("CPC_type", DEFAULT_SETTINGS["CPC_type"])
 
     range1.value = np.array(settings.get("range1", DEFAULT_SETTINGS["range1"]))
     sheath1.value = settings.get("range1_sheath", DEFAULT_SETTINGS["range1_sheath"])
@@ -344,7 +348,7 @@ def init():
     #dac.block()
     flowmeter = ctl.Flowmeter()
     blower = ctl.BlowerDAC()
-    cpc = ctl.CPC(cpc_com_port.value)
+    cpc = ctl.CPC(cpc_com_port.value, cpc_type.value)
     inletValve = ctl.PicoValve()
 
     
@@ -1218,6 +1222,7 @@ for widget in [
     polarity_switch_time,
     Bipolar_toggle,
     Ntot_time,
+    cpc_type,
 ]:
     widget.param.watch(on_scan_setting_change, "value")
 
@@ -1230,7 +1235,7 @@ update_scan_preview()
 #### Layout ####
 layout = pn.Column(
     "# DMA / CPC Control GUI",
-    pn.Row(cpc_com_port),
+    pn.Row(cpc_com_port, cpc_type),
     "# CPC / DMA control panel",
     pn.Row(start_button, status_text, init_button, stop_button),
     "### Scan range 1",

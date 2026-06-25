@@ -55,8 +55,10 @@ def intfun(dp, t, press, p, volt, pituus, arkaksi, aryksi, qa, qc, qm, qs,
             
     elif charging_efficiency == 'fuchs':
         charge = np.zeros((len(dp), len(p)))
+        print(len(dp))
 
         for i in range(len(dp)):
+            print(f"Calculating charge fraction for dp = {dp[i]:.3e} m")
             frac, beta_p, beta_n = calChargeFracF(
                 dp[i], Zp, Zn, Mrp, Mrn,
                 Np=Np, Nn=Nn, epsp=1000, T=t, P=press
