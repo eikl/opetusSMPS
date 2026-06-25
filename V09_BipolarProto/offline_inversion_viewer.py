@@ -241,6 +241,7 @@ select_last_button.on_click(select_last_n)
 
 def plot_selected_scans(event=None):
     df = load_selected_scans()
+    df = df[df["Ntot"] == False]  
     if df.empty:
         status.object = "No selected scan data."
         return
@@ -488,6 +489,8 @@ def estimate_ion_mobility_ratio_for_scan(g_scan, temp=293.15, press=101325):
 
 def invert_one_scan(d, polarity, zratio=None, temp=293.15, press=101325):
     d = d.copy()
+    ntot = d[d["Ntot"] == True].copy()
+    d = d[d["Ntot"] == False]
     d["cpc_float"] = pd.to_numeric(d["cpc_count"], errors="coerce")
     d["abs_size_nm"] = pd.to_numeric(d["size_nm"], errors="coerce").abs()
     d = d.dropna(subset=["abs_size_nm", "cpc_float"])
@@ -594,11 +597,25 @@ def run_inversion_calculation(df):
         heat_cols = []
         heat_times = []
         ntot_vals = []
+        ntot_measured = []
+        
+        output.append({
+                "kind": "ntot",
+                "polarity": polarity,
+                "x": heat_times,
+                "y": ntot_vals,
+                "y_measured": ntot_measured,
+            })
 
         for scan_id, g_scan in dd.groupby(group_key):
             zratio = zratios.get(scan_id, np.nan)
             scan_parts = []
             ntot_scan = 0.0
+            
+            ntot_rows = g_scan[g_scan["Ntot"] == True]
+            ntot_measured.append(ntot_rows["cpc_float"].mean())
+            
+   
 
             for _, g_range in g_scan.groupby("scan_range"):
                 invdf = invert_one_scan(
@@ -652,6 +669,8 @@ def run_inversion_calculation(df):
                 "x": heat_times,
                 "y": ntot_vals,
             })
+            
+            
 
     output.append({
         "kind": "ion_ratio",
@@ -703,10 +722,22 @@ def plot_inversion_result(result):
                 x=tr["x"],
                 y=tr["y"],
                 mode="lines+markers",
-                name=f"Ntot {tr['polarity']}",
+                name=f"Inverted Ntot {tr['polarity']}",
                 row=3,
                 col=1,
             )
+
+            fig.add_scatter(
+                x=tr["x"],
+                y=tr["y_measured"],
+                mode="markers",
+                marker_symbol="x",
+                marker_size=10,
+                name=f"Measured Ntot {tr['polarity']}",
+                row=3,
+                col=1,
+            )
+            
 
         elif tr["kind"] == "ion_ratio":
             fig.add_scatter(

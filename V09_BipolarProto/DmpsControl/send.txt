@@ -6,46 +6,6 @@ import smbus2
 from smbus2 import i2c_msg
 from gpiozero import OutputDevice, PWMOutputDevice
 
-class CPC:
-    def __init__(self, port):
-        self.ser = serial.Serial(
-            port=port,
-            baudrate=9600,
-            bytesize=serial.SEVENBITS,
-            parity=serial.PARITY_EVEN,
-            stopbits=serial.STOPBITS_ONE,
-            timeout=1
-        )
-
-    def read_instrument(self):
-        self.ser.write(b"RB\r")
-        return self.ser.readline().decode("utf-8").strip()
-class HaukeDMA:
-    def __init__(self):
-        self.r1 = 0.025
-        self.r2 = 0.033
-        self.L = 0.28
-        
-I2C_BUS = 1
-I2C_ADDRESS = 0x40
-
-SCALE_FACTOR = 140.0
-OFFSET = 32000.0
-
-def crc8(data):
-    crc = 0x00
-
-    for byte in data:
-        crc ^= byte
-
-        for _ in range(8):
-            if crc & 0x80:
-                crc = ((crc << 1) ^ 0x31) & 0xFF
-            else:
-                crc = (crc << 1) & 0xFF
-
-    return crc
-
 
 class Flowmeter:
     def __init__(self):
@@ -95,42 +55,7 @@ class Flowmeter:
 
     def get_flow(self):
         return self.flow
-
-
-class PicoValve:
-    def __init__(self, port="/dev/ttyACM0", baudrate=115200):
-        self.ser = serial.Serial(port, baudrate, timeout=2)
-        time.sleep(2)
-        self.ser.reset_input_buffer()
-
-    def command(self, cmd):
-        self.ser.write((cmd + "\n").encode())
-        return self.ser.readline().decode().strip()
-
-    def on(self):
-        return self.command("ON")
-
-    def off(self):
-        return self.command("OFF")
-
-    def status(self):
-        return self.command("STATUS")
-
-    def close(self):
-        self.off()
-        self.ser.close()
-        
-class DacOut:
-    def __init__(self, pin=18):
-        self.sw = OutputDevice(pin, initial_value=0)
-
-    def allow(self):
-        self.sw.value = 1
-
-    def block(self):
-        self.sw.value = 0
-
-
+    
 class BlowerDAC:
     def __init__(self):
         self.dac = GP8403(
@@ -161,15 +86,52 @@ class BlowerDAC:
 
     def get_parameter(self):
         return self.voltage
+    
+from simple_pid import PID
+import threading
+import time
+
+
+class FlowController:
+    def __init__(self, flowmeter, blower, flow_lpm=10):
+        self.flowmeter = flowmeter
+        self.blower = blower
+        self.pid = PID(0.008, 0.015, 0, setpoint=flow_lpm)
+        self.pid.output_limits = (0, 5)
+        self.running = False
+        self.out = 2.5
+        self.blower.set_voltage(self.out)
+
+    def setpoint(self, flow_lpm):
+        self.pid.setpoint = flow_lpm
+
+    def start(self):
+        if self.running:
+            return
+        self.running = True
+        threading.Thread(target=self.loop, daemon=True).start()
+
+    def loop(self):
+        while self.running:
+            try:
+                self.flowmeter.step()
+                raw = self.flowmeter.get_flow()
+                self.out = self.pid(raw)
+                self.blower.set_voltage(self.out)
+            except OSError as e:
+                print(f"Flowmeter I2C error: {e}", flush=True)
+                time.sleep(0.5)
+
+            time.sleep(0.1)
+
 
 if __name__ == "__main__":
-    valve = PicoValve()
-    print("Turning valve ON...")
-    print(valve.on())
-    time.sleep(20)
-    print("Valve status:", valve.status())
-    print("Turning valve OFF...")
-    print(valve.off())
-    time.sleep(2)
-    print("Valve status:", valve.status())
-    valve.close()
+    flowmeter = Flowmeter()
+    blower = BlowerDAC()
+
+    controller = FlowController(flowmeter, blower, 10)
+    controller.start()
+
+    while True:
+        time.sleep(1)
+
