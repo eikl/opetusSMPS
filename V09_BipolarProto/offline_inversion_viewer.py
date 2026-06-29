@@ -36,6 +36,7 @@ DEFAULT_SETTINGS = {
     "press_Pa": 101325,
     "zratio": 1.35e-4 / 1.60e-4,
     "heatmap_clip": 20000,
+    "smallest_size": 6.5,
 }
 
 pn.extension("plotly")
@@ -190,6 +191,7 @@ zratio_widget = pn.widgets.FloatInput(
 )
 use_zratio_checkbox = pn.widgets.Checkbox(name="Use Zp/Zn from settings", value=False)
 
+smallest_size = pn.widgets.FloatInput(name="Smallest size (nm)", value=6.5, step=0.1)
 heatmap_clip = pn.widgets.FloatInput(
     name="Heatmap clip",
     value=float(settings.get("heatmap_clip", 20000)),
@@ -495,7 +497,7 @@ def invert_one_scan(d, polarity, zratio=None, temp=293.15, press=101325):
     d["abs_size_nm"] = pd.to_numeric(d["size_nm"], errors="coerce").abs()
     d = d.dropna(subset=["abs_size_nm", "cpc_float"])
     d = d[d["cpc_float"] > 0]
-    d = d[d["abs_size_nm"] > 5.5]
+    d = d[d["abs_size_nm"] > smallest_size.value]
     d = d.sort_values("abs_size_nm")
 
     y_series = d.groupby("abs_size_nm")["cpc_float"].mean()
@@ -560,7 +562,7 @@ def invert_one_scan(d, polarity, zratio=None, temp=293.15, press=101325):
         )
 
         vals = inv.intfun(gl_pts, *args).reshape(len(dp_grid_nm), len(_GL_NODES))
-        A[i, :] = 0.25 * vals @ _GL_WEIGHTS
+        A[i, :] = 0.5 * vals @ _GL_WEIGHTS
 
     x, _ = nnls(A, y)
 
@@ -607,7 +609,7 @@ def run_inversion_calculation(df):
             ntot_scan = 0.0
 
             ntot_rows = g_scan[g_scan["Ntot"] == True].copy()
-            ntot_rows["cpc_float"] = pd.to_numeric(ntot_rows["cpc_count"], errors="coerce")/2
+            ntot_rows["cpc_float"] = pd.to_numeric(ntot_rows["cpc_count"], errors="coerce")
             measured_ntot = ntot_rows["cpc_float"].mean()
 
             for _, g_range in g_scan.groupby("scan_range"):
@@ -626,7 +628,7 @@ def run_inversion_calculation(df):
                 dp_inv = invdf["abs_size_nm"].to_numpy(dtype=float)
                 n_inv = invdf["N_GWalpha"].to_numpy(dtype=float)
 
-                ntot_scan += trapezoid(n_inv, np.log(dp_inv))
+                ntot_scan += np.nansum(n_inv)
 
                 order = np.argsort(dp_inv)
                 scan_parts.append((dp_inv[order], n_inv[order]))
@@ -825,6 +827,7 @@ for w in [
     press_Pa,
     zratio_widget,
     heatmap_clip,
+    smallest_size,
 ]:
     w.param.watch(lambda event: save_settings(), "value")
 
@@ -836,7 +839,7 @@ layout = pn.Column(
     "### DMA / inversion settings",
     pn.Row(dma_L, dma_r1, dma_r2),
     pn.Row(qa_lpm, qs_lpm, temp_K, press_Pa),
-    pn.Row(zratio_widget, use_zratio_checkbox, heatmap_clip),
+    pn.Row(zratio_widget, use_zratio_checkbox, heatmap_clip, smallest_size),
     pn.Row(plot_button, invert_button, status),
     "## Raw scans",
     raw_plot,
