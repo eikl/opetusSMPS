@@ -494,6 +494,8 @@ def invert_one_scan(d, polarity, zratio=None, temp=293.15, press=101325):
     d["cpc_float"] = pd.to_numeric(d["cpc_count"], errors="coerce")
     d["abs_size_nm"] = pd.to_numeric(d["size_nm"], errors="coerce").abs()
     d = d.dropna(subset=["abs_size_nm", "cpc_float"])
+    d = d[d["cpc_float"] > 0]
+    d = d[d["abs_size_nm"] > 5.5]
     d = d.sort_values("abs_size_nm")
 
     y_series = d.groupby("abs_size_nm")["cpc_float"].mean()
@@ -549,11 +551,11 @@ def invert_one_scan(d, polarity, zratio=None, temp=293.15, press=101325):
             temp, press, p, voltage,
             dma.L, dma.r2, dma.r1,
             qa, qc, qm, qs,
-            2.55, qa, 1,
+            1.93, qa, 1,
             zp, zn,
             140, 101,
             1e13, 1e13,
-            "fuchs",
+            "gunn woessner mod",
             0,
         )
 

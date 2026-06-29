@@ -370,7 +370,7 @@ def measurement_loop():
     while True:
         if measurement_running.is_set():
             measurement_step()
-        time.sleep(0.05)
+        time.sleep(0.5)
 
 
 def ensure_measurement_thread():
@@ -475,9 +475,10 @@ def measurement_step(debug=True):
             flow_controller.setpoint(q_sheath)
             ctl.HV.voltage_set(dp, Q_sh_lpm=q_sheath)
 
-            if np.sign(dp) == polarity_switch:
+            new_sign = int(np.sign(dp))
+            if new_sign != polarity_switch:
                 time.sleep(float(polarity_switch_time.value))
-                polarity_switch = polarity_switch * -1
+                polarity_switch = new_sign
 
             if measurement_finished:
                 time.sleep(float(settling_time.value))
@@ -539,6 +540,11 @@ def measurement_step(debug=True):
                         df2_inv = df2[df2["Ntot"] == False].copy()
                     else:
                         df2_inv = df2[df2["size_nm"] != 0].copy()
+
+                    if "Ntot" in df2.columns:
+                        df2_inv = df2[df2["Ntot"] == False].copy()
+                    else:
+                        df2_inv = df2.copy()
 
                     start_inversion_job(df2_inv)
                     completed_scans.append(pd.DataFrame(scan_rows.copy()))
@@ -1128,7 +1134,6 @@ def add_cached_heatmaps(fig):
                 x=tr["x"],
                 y=tr["y"],
                 zmin=0,
-                zmax=20000,
                 colorbar=dict(title=f"{tr['polarity']}"),
                 name=tr["name"],
                 row=tr["row"],

@@ -1,6 +1,12 @@
 import numpy as np
 from .ltubefl import ltubefl
 
+def cpc_loss_curve(Dp, D50=None, D0=None, eta=None):
+    if D50 is None:
+        D50 = 6.2024e-9
+        D0 = 4.6581e-9
+        eta = 0.9041
+    return (1-np.exp(-np.log(2)*((Dp-D0)/(D50-D0))))*eta
 
 def cpc_loss1(dp, temp, press, cpc_type=3010):
     # Use one:
@@ -83,6 +89,9 @@ def cpc_loss1(dp, temp, press, cpc_type=3010):
         EFFD2[iis] = 0
         
         res = EFFD1 * EFFD2
+    
+    elif cpc_type == "HY09":
+        res = cpc_loss_curve(dp)
     
     return res
 
