@@ -560,7 +560,7 @@ def invert_one_scan(d, polarity, zratio=None, temp=293.15, press=101325):
         )
 
         vals = inv.intfun(gl_pts, *args).reshape(len(dp_grid_nm), len(_GL_NODES))
-        A[i, :] = 0.5 * vals @ _GL_WEIGHTS
+        A[i, :] = 0.25 * vals @ _GL_WEIGHTS
 
     x, _ = nnls(A, y)
 
