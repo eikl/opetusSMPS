@@ -1,6 +1,6 @@
 {
   "scan_root": "logs/scans",
-  "n_scans_plot": 100,
+  "n_scans_plot": 250,
   "dma_L": 0.28,
   "dma_r1": 0.025,
   "dma_r2": 0.033,
