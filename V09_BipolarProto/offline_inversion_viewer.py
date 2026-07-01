@@ -1,3 +1,4 @@
+from datetime import date
 import json
 import traceback
 import threading
@@ -26,7 +27,11 @@ SETTINGS_FILE = Path("settings_inversion.json")
 
 DEFAULT_SETTINGS = {
     "scan_root": "logs/scans",
-    "n_scans_plot": 5,
+    "save_root": "~/OneDrive/DMPS_inversions",
+    "n_scans_plot": 200,
+    "auto_interval_min": 30,
+    "auto_file_age_sec": 120,
+    "daily_overwrite": True,
     "dma_L": 0.28,
     "dma_r1": 0.025,
     "dma_r2": 0.033,
@@ -45,6 +50,8 @@ inversion_executor = ThreadPoolExecutor(max_workers=1)
 inversion_lock = threading.Lock()
 inversion_running = False
 latest_inversion = None
+auto_pending_signature = None
+AUTO_STATE_FILE = Path("auto_inversion_state.json")
 
 
 # ---------------------------------------------------------------------
@@ -70,7 +77,11 @@ def load_settings():
 def save_settings():
     settings = {
         "scan_root": scan_root.value,
+        "save_root": save_root.value,
         "n_scans_plot": int(n_scans_plot.value),
+        "auto_interval_min": int(auto_interval_min.value),
+        "auto_file_age_sec": int(auto_file_age_sec.value),
+        "daily_overwrite": bool(daily_overwrite_checkbox.value),
         "dma_L": float(dma_L.value),
         "dma_r1": float(dma_r1.value),
         "dma_r2": float(dma_r2.value),
@@ -83,6 +94,97 @@ def save_settings():
     }
     SETTINGS_FILE.write_text(json.dumps(settings, indent=2))
 
+
+def _json_safe(value):
+    if isinstance(value, np.ndarray):
+        return value.tolist()
+    if isinstance(value, (pd.Timestamp,)):
+        return value.isoformat()
+    if isinstance(value, (np.integer,)):
+        return int(value)
+    if isinstance(value, (np.floating,)):
+        return float(value)
+    if isinstance(value, list):
+        return [_json_safe(v) for v in value]
+    if isinstance(value, dict):
+        return {k: _json_safe(v) for k, v in value.items()}
+    return value
+
+def save_data(event=None):
+    if latest_inversion is None:
+        status.object = "No inversion data to save yet."
+        return
+    outdir = Path(save_root.value).expanduser()
+    outdir.mkdir(parents=True, exist_ok=True)
+    if daily_overwrite_checkbox.value:
+        stamp = pd.Timestamp.now().strftime("%Y%m%d")
+    else:
+        stamp = pd.Timestamp.now().strftime("%Y%m%d_%H%M%S")
+    if raw_plot.object is not None:
+        raw_plot.object.write_html(outdir / f"raw_plot_{stamp}.html")
+    if inversion_plot.object is not None:
+        inversion_plot.object.write_html(outdir / f"inversion_plot_{stamp}.html")
+    ntot_tables = []
+    for tr in latest_inversion:
+        if tr["kind"] == "heatmap":
+            z = np.asarray(tr["Z"], dtype=float)
+            heatmap_df = pd.DataFrame(
+                z.T,
+                index=pd.to_datetime(tr["x"]),
+                columns=np.asarray(tr["y"], dtype=float),
+            )
+            heatmap_df.index.name = "time"
+            heatmap_df.columns.name = "size_nm"
+            heatmap_df.to_csv(
+                outdir / f"heatmap_{tr['polarity']}_{stamp}.csv"
+            )
+        elif tr["kind"] == "ntot":
+            polarity = tr["polarity"]
+            d = pd.DataFrame({
+                "time": pd.to_datetime(tr["x"]),
+                f"Ntot_{polarity}_inverted": tr["y"],
+            })
+            if polarity == "positive" and "y_measured" in tr:
+                d["Ntot_measured"] = tr["y_measured"]
+            ntot_tables.append(d)
+            
+        elif tr["kind"] == "ion_ratio":
+            ion_ratio_df = pd.DataFrame({
+                "time": pd.to_datetime(tr["x"]),
+                "Zp_Zn": tr["y"],
+                "selected_dp_nm": tr["selected_dp"],
+            })
+            ion_ratio_df = ion_ratio_df.set_index("time").sort_index()
+            ion_ratio_df.to_csv(outdir / f"estimated_z_ratio_{stamp}.csv")
+    if ntot_tables:
+        ntot_df = ntot_tables[0]
+        for d in ntot_tables[1:]:
+            ntot_df = pd.merge(ntot_df, d, on="time", how="outer")
+        ntot_df = ntot_df.sort_values("time")
+        try:
+            t0 = ntot_df["time"].min()
+            t1 = ntot_df["time"].max()
+
+            smear_cpc = load_smeariii_cpc_concentration(
+                t0 - pd.Timedelta(hours=1),
+                t1 - pd.Timedelta(hours=1),
+            )
+            smear_cpc["time"] = smear_cpc["time"] + pd.Timedelta(hours=1)
+            smear_cpc = smear_cpc[smear_cpc["time"].between(t0, t1)].copy()
+
+            if not smear_cpc.empty:
+                ntot_df = pd.merge_asof(
+                    ntot_df.sort_values("time"),
+                    smear_cpc[["time", "SMEARIII_CPC"]].sort_values("time"),
+                    on="time",
+                    direction="nearest",
+                    tolerance=pd.Timedelta(minutes=15),
+                )
+        except Exception as e:
+            print(f"Could not save SMEAR III CPC: {e}", flush=True)
+        ntot_df = ntot_df.set_index("time")
+        ntot_df.to_csv(outdir / f"ntot_{stamp}.csv")
+    status.object = f"Saved plots and data to `{outdir}`."
 
 def cunningham_correction(dp, T=293.15, P=101325, a=1.142, b=0.558, c=0.999):
     lambda_0 = 67.3e-9
@@ -118,7 +220,77 @@ def get_scan_size_axis(df):
     sizes = sorted(pd.to_numeric(df["size_nm"], errors="coerce").abs().dropna().unique())
     return np.asarray(sizes, dtype=float)
 
+import requests
 
+SMEAR_API = "https://smear-backend-avaa-smear-prod.2.rahtiapp.fi"
+def load_smeariii_cpc_concentration(start, end):
+    url = f"{SMEAR_API}/search/timeseries"
+    start = pd.to_datetime(start)
+    end = pd.to_datetime(end)
+    params = {
+        "from": start.strftime("%Y-%m-%dT%H:%M:%S.000"),
+        "to": end.strftime("%Y-%m-%dT%H:%M:%S.000"),
+        "tablevariable": "KUM_AERO.cn",
+        "quality": "ANY",
+        "aggregation": "NONE",
+    }
+    r = requests.get(url, params=params, timeout=30)
+    r.raise_for_status()
+    payload = r.json()
+    df = pd.DataFrame(payload["data"])
+    if df.empty:
+        print(
+            f"No SMEAR III CPC API data for {params['from']} to {params['to']}",
+            flush=True,
+        )
+        return pd.DataFrame(columns=["time", "SMEARIII_CPC"])
+    df = df.rename(columns={
+        "samptime": "time",
+        "KUM_AERO.cn": "SMEARIII_CPC",
+    })
+    df["time"] = pd.to_datetime(df["time"])
+    df["SMEARIII_CPC"] = pd.to_numeric(df["SMEARIII_CPC"], errors="coerce")
+    return df[["time", "SMEARIII_CPC"]]
+
+
+def list_scan_files(min_age_sec=0):
+    root = Path(scan_root.value).expanduser()
+    files = root.glob("*/*.csv")
+
+    if min_age_sec > 0:
+        now = pd.Timestamp.now().timestamp()
+        files = [p for p in files if now - p.stat().st_mtime >= min_age_sec]
+
+    return sorted(files, key=lambda p: (p.parent.name, p.stem))
+
+
+def load_auto_state():
+    if not AUTO_STATE_FILE.exists():
+        return {"last_saved_signature": None}
+
+    try:
+        return json.loads(AUTO_STATE_FILE.read_text())
+    except json.JSONDecodeError:
+        return {"last_saved_signature": None}
+
+
+def save_auto_state(state):
+    AUTO_STATE_FILE.write_text(json.dumps(state, indent=2))
+
+
+def selected_files_signature():
+    parts = []
+
+    for f in scan_files.value:
+        p = Path(f)
+        try:
+            stat = p.stat()
+            parts.append(f"{p}:{stat.st_mtime_ns}:{stat.st_size}")
+        except FileNotFoundError:
+            parts.append(str(p))
+
+    return "|".join(parts)
+    
 def load_selected_scans():
     dfs = []
 
@@ -155,10 +327,30 @@ scan_root = pn.widgets.TextInput(
     width=700,
 )
 
+save_root = pn.widgets.TextInput(
+    name="Save folder",
+    value=settings.get("save_root", DEFAULT_SETTINGS["save_root"]),
+    width=700,
+)
+
 n_scans_plot = pn.widgets.IntInput(
     name="Auto-select last N",
     value=int(settings.get("n_scans_plot", DEFAULT_SETTINGS["n_scans_plot"])),
     step=1,
+    width=160,
+)
+
+auto_interval_min = pn.widgets.IntInput(
+    name="Auto interval min",
+    value=int(settings.get("auto_interval_min", DEFAULT_SETTINGS["auto_interval_min"])),
+    step=1,
+    width=160,
+)
+
+auto_file_age_sec = pn.widgets.IntInput(
+    name="Min file age sec",
+    value=int(settings.get("auto_file_age_sec", DEFAULT_SETTINGS["auto_file_age_sec"])),
+    step=10,
     width=160,
 )
 
@@ -167,6 +359,13 @@ scan_files = pn.widgets.MultiChoice(
     options=[],
     value=[],
     width=900,
+)
+
+save_button = pn.widgets.Button(name="Save plots/data", button_type="primary")
+auto_checkbox = pn.widgets.Checkbox(name="Auto-run", value=False)
+daily_overwrite_checkbox = pn.widgets.Checkbox(
+    name="Daily overwrite files",
+    value=bool(settings.get("daily_overwrite", DEFAULT_SETTINGS["daily_overwrite"])),
 )
 
 refresh_button = pn.widgets.Button(name="Refresh scan list", button_type="primary")
@@ -210,7 +409,7 @@ inversion_plot = pn.pane.Plotly(height=850, width=1300)
 
 def refresh_scan_files(event=None):
     root = Path(scan_root.value).expanduser()
-    files = sorted(root.glob("*/*.csv"), key=lambda p: (p.parent.name, p.stem))
+    files = list_scan_files()
 
     print("cwd:", Path.cwd(), flush=True)
     print("scan root:", root.resolve(), flush=True)
@@ -226,8 +425,7 @@ def refresh_scan_files(event=None):
 
 
 def select_last_n(event=None):
-    root = Path(scan_root.value).expanduser()
-    files = sorted(root.glob("*/*.csv"), key=lambda p: (p.parent.name, p.stem))
+    files = list_scan_files()
     n = max(1, int(n_scans_plot.value))
     scan_files.options = [str(p) for p in files]
     scan_files.value = [str(p) for p in files[-n:]]
@@ -628,7 +826,7 @@ def run_inversion_calculation(df):
                 dp_inv = invdf["abs_size_nm"].to_numpy(dtype=float)
                 n_inv = invdf["N_GWalpha"].to_numpy(dtype=float)
 
-                ntot_scan += np.nansum(n_inv)
+                ntot_scan += np.trapezoid(n_inv)
 
                 order = np.argsort(dp_inv)
                 scan_parts.append((dp_inv[order], n_inv[order]))
@@ -724,15 +922,40 @@ def plot_inversion_result(result):
                 row=3,
                 col=1,
             )
+            
+            
+            
+            
 
-            if "y_measured" in tr:
+            if "y_measured" in tr and tr['polarity'] == "positive":
+                from inv_funcs.ltubefl import ltubefl
+                y=tr["y_measured"] / ltubefl(20e-9, 3, 6.5/60000, 297.15, 101325)
                 fig.add_scatter(
                     x=tr["x"],
                     y=tr["y_measured"],
                     mode="markers",
                     marker_symbol="x",
                     marker_size=10,
-                    name=f"Measured Ntot {tr['polarity']}",
+                    name=f"Measured Ntot",
+                    row=3,
+                    col=1,
+                )
+                
+                t0 = pd.to_datetime(tr["x"][0])
+                t1 = pd.to_datetime(tr["x"][-1])
+                totalconc = load_smeariii_cpc_concentration(t0 - pd.Timedelta(hours=1), t1 - pd.Timedelta(hours=1))
+                totalconc["time"] = totalconc["time"] + pd.Timedelta(hours=1)
+                totalconc = totalconc[
+                    totalconc["time"].between(t0, t1)
+                ].copy()
+                
+                totalconc["SMEARIII_CPC"] = totalconc["SMEARIII_CPC"]/2
+                
+                fig.add_scatter(
+                    x=totalconc["time"],
+                    y=totalconc["SMEARIII_CPC"],
+                    mode="lines+markers",
+                    name="SMEAR III CPC",
                     row=3,
                     col=1,
                 )
@@ -787,17 +1010,30 @@ def run_inversion(event=None):
 
     doc = pn.state.curdoc
     def done_callback(future):
-        global inversion_running, latest_inversion
+        global inversion_running, latest_inversion, auto_pending_signature
         try:
             result = future.result()
             latest_inversion = result
-            if doc is not None:
-                doc.add_next_tick_callback(lambda: plot_inversion_result(result))
-                doc.add_next_tick_callback(lambda: setattr(status, "object", "Inversion finished."))
-            else:
+            def finish_success():
+                global auto_pending_signature
+
                 plot_inversion_result(result)
-                status.object = "Inversion finished."
+
+                if auto_checkbox.value:
+                    save_data()
+                    if auto_pending_signature is not None:
+                        save_auto_state({"last_saved_signature": auto_pending_signature})
+                        auto_pending_signature = None
+                    status.object = "Auto-run: inversion finished and saved."
+                else:
+                    status.object = "Inversion finished."
+
+            if doc is not None:
+                doc.add_next_tick_callback(finish_success)
+            else:
+                finish_success()
         except Exception:
+            auto_pending_signature = None
             traceback.print_exc()
             if doc is not None:
                 doc.add_next_tick_callback(
@@ -812,12 +1048,53 @@ def run_inversion(event=None):
     fut.add_done_callback(done_callback)
 
 
+def auto_refresh_invert_save():
+    global auto_pending_signature
+
+    if not auto_checkbox.value:
+        return
+
+    min_age = max(0, int(auto_file_age_sec.value))
+    files = list_scan_files(min_age_sec=min_age)
+
+    scan_files.options = [str(p) for p in files]
+
+    if not files:
+        status.object = "Auto-run: no completed scan files found."
+        return
+
+    n = max(1, int(n_scans_plot.value))
+    scan_files.value = [str(p) for p in files[-n:]]
+
+    signature = selected_files_signature()
+    state = load_auto_state()
+
+    if signature == state.get("last_saved_signature"):
+        status.object = "Auto-run: no new selected scans."
+        return
+
+    with inversion_lock:
+        running = inversion_running
+
+    if running:
+        status.object = "Auto-run: inversion already running."
+        return
+
+    auto_pending_signature = signature
+    status.object = "Auto-run: new scans detected, running inversion."
+    run_inversion()
+
+save_button.on_click(save_data)
 invert_button.on_click(run_inversion)
 
 
 for w in [
     scan_root,
+    save_root,
     n_scans_plot,
+    auto_interval_min,
+    auto_file_age_sec,
+    daily_overwrite_checkbox,
     dma_L,
     dma_r1,
     dma_r2,
@@ -835,12 +1112,14 @@ for w in [
 layout = pn.Column(
     "# Offline DMPS inversion / scan viewer",
     pn.Row(scan_root, refresh_button, select_last_button, n_scans_plot),
+    pn.Row(save_root),
+    pn.Row(auto_checkbox, daily_overwrite_checkbox, auto_interval_min, auto_file_age_sec),
     scan_files,
     "### DMA / inversion settings",
     pn.Row(dma_L, dma_r1, dma_r2),
     pn.Row(qa_lpm, qs_lpm, temp_K, press_Pa),
     pn.Row(zratio_widget, use_zratio_checkbox, heatmap_clip, smallest_size),
-    pn.Row(plot_button, invert_button, status),
+    pn.Row(plot_button, invert_button, save_button, status),
     "## Raw scans",
     raw_plot,
     "## Inversion",
@@ -849,4 +1128,16 @@ layout = pn.Column(
 )
 
 refresh_scan_files()
+auto_callback = pn.state.add_periodic_callback(
+    auto_refresh_invert_save,
+    period=max(1, int(auto_interval_min.value)) * 60 * 1000,
+    start=True,
+)
+
+
+def update_auto_period(event):
+    auto_callback.period = max(1, int(auto_interval_min.value)) * 60 * 1000
+
+
+auto_interval_min.param.watch(update_auto_period, "value")
 layout.servable()

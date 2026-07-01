@@ -1,6 +1,10 @@
 {
   "scan_root": "logs/scans",
-  "n_scans_plot": 250,
+  "save_root": "~/OneDrive/DMPS_inversions",
+  "n_scans_plot": 200,
+  "auto_interval_min": 30,
+  "auto_file_age_sec": 120,
+  "daily_overwrite": true,
   "dma_L": 0.28,
   "dma_r1": 0.025,
   "dma_r2": 0.033,

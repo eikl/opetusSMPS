@@ -23,8 +23,8 @@ def intfun(dp, t, press, p, volt, pituus, arkaksi, aryksi, qa, qc, qm, qs,
 
     # Laminar flow tube losses
     tubeloss = ltubefl(dp, pipelength, pipeflow, t, press)
-    tubeloss2 = ltubefl(dp, 2.80, 6.3, t, press)
-    tubeloss3 = ltubefl(dp, 1.21, 1.3, t, press)
+    tubeloss2 = ltubefl(dp, 4.80, 6.3/60000, t, press)
+    tubeloss3 = ltubefl(dp, 6.21, 1.3/60000, t, press)
     
     tubeloss = tubeloss * tubeloss2 * tubeloss3
     
