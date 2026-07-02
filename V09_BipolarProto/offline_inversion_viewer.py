@@ -1,4 +1,5 @@
 from datetime import date
+import copy
 import json
 import sys
 import time
@@ -57,6 +58,26 @@ inversion_running = False
 latest_inversion = None
 auto_pending_signature = None
 AUTO_STATE_FILE = Path("auto_inversion_state.json")
+SHARED_STATE_KEY = "offline_inversion_viewer_shared_state"
+shared_state = pn.state.cache.setdefault(
+    SHARED_STATE_KEY,
+    {
+        "lock": threading.Lock(),
+        "version": 0,
+        "raw_fig": None,
+        "inversion_fig": None,
+        "latest_inversion": None,
+        "status": "Status: idle",
+    },
+)
+with shared_state["lock"]:
+    local_shared_version = (
+        shared_state["version"]
+        if shared_state["raw_fig"] is None
+        and shared_state["inversion_fig"] is None
+        and shared_state["latest_inversion"] is None
+        else -1
+    )
 
 
 # ---------------------------------------------------------------------
@@ -443,6 +464,49 @@ raw_plot = pn.pane.Plotly(height=750, width=1300)
 inversion_plot = pn.pane.Plotly(height=850, width=1300)
 
 
+def publish_shared_state(
+    *,
+    raw_fig=None,
+    inversion_fig=None,
+    inversion_result=None,
+    status_text=None,
+):
+    with shared_state["lock"]:
+        if raw_fig is not None:
+            shared_state["raw_fig"] = raw_fig
+        if inversion_fig is not None:
+            shared_state["inversion_fig"] = inversion_fig
+        if inversion_result is not None:
+            shared_state["latest_inversion"] = inversion_result
+        if status_text is not None:
+            shared_state["status"] = status_text
+        shared_state["version"] += 1
+
+
+def sync_shared_state():
+    global latest_inversion, local_shared_version
+
+    with shared_state["lock"]:
+        version = shared_state["version"]
+        if version == local_shared_version:
+            return
+        raw_fig = shared_state["raw_fig"]
+        inversion_fig = shared_state["inversion_fig"]
+        inversion_result = shared_state["latest_inversion"]
+        status_text = shared_state["status"]
+
+    if raw_fig is not None:
+        raw_plot.object = copy.deepcopy(raw_fig)
+    if inversion_fig is not None:
+        inversion_plot.object = copy.deepcopy(inversion_fig)
+    if inversion_result is not None:
+        latest_inversion = inversion_result
+    if status_text is not None:
+        status.object = status_text
+
+    local_shared_version = version
+
+
 # ---------------------------------------------------------------------
 # Scan file browser
 # ---------------------------------------------------------------------
@@ -595,8 +659,10 @@ def plot_selected_scans(event=None):
         legend=dict(x=1.02, y=1.0),
     )
 
+    status_text = f"Plotted **{df['scan_id'].nunique()}** scan(s)."
     raw_plot.object = fig
-    status.object = f"Plotted **{df['scan_id'].nunique()}** scan(s)."
+    status.object = status_text
+    publish_shared_state(raw_fig=fig, status_text=status_text)
 
 
 plot_button.on_click(plot_selected_scans)
@@ -1037,6 +1103,7 @@ def plot_inversion_result(result):
     )
 
     inversion_plot.object = fig
+    return fig
 
 
 def run_inversion(event=None):
@@ -1066,16 +1133,23 @@ def run_inversion(event=None):
             def finish_success():
                 global auto_pending_signature
 
-                plot_inversion_result(result)
+                fig = plot_inversion_result(result)
 
                 if auto_checkbox.value:
                     save_data()
                     if auto_pending_signature is not None:
                         save_auto_state({"last_saved_signature": auto_pending_signature})
                         auto_pending_signature = None
-                    status.object = "Auto-run: inversion finished and saved."
+                    status_text = "Auto-run: inversion finished and saved."
                 else:
-                    status.object = "Inversion finished."
+                    status_text = "Inversion finished."
+
+                status.object = status_text
+                publish_shared_state(
+                    inversion_fig=fig,
+                    inversion_result=result,
+                    status_text=status_text,
+                )
 
             if doc is not None:
                 doc.add_next_tick_callback(finish_success)
@@ -1162,9 +1236,14 @@ def run_auto_worker():
                 result = run_inversion_calculation(df)
 
                 latest_inversion = result
-                plot_inversion_result(result)
+                fig = plot_inversion_result(result)
                 save_data()
                 save_auto_state({"last_saved_signature": signature})
+                publish_shared_state(
+                    inversion_fig=fig,
+                    inversion_result=result,
+                    status_text=str(status.object),
+                )
                 print(str(status.object), flush=True)
 
         except KeyboardInterrupt:
@@ -1222,6 +1301,11 @@ refresh_scan_files()
 auto_callback = pn.state.add_periodic_callback(
     auto_refresh_invert_save,
     period=max(1, int(auto_interval_min.value)) * 60 * 1000,
+    start=True,
+)
+shared_sync_callback = pn.state.add_periodic_callback(
+    sync_shared_state,
+    period=2000,
     start=True,
 )
 
