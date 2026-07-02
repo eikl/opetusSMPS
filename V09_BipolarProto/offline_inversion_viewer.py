@@ -1,5 +1,7 @@
 from datetime import date
 import json
+import sys
+import time
 import traceback
 import threading
 from pathlib import Path
@@ -17,6 +19,9 @@ from numpy.polynomial.legendre import leggauss
 _GL_NODES, _GL_WEIGHTS = leggauss(5)
 
 import inv_funcs as inv
+from inv_funcs.cpc_loss import cpc_loss1
+from inv_funcs.dmps_loss import dmps_loss1
+from inv_funcs.ltubefl import ltubefl
 
 
 # ---------------------------------------------------------------------
@@ -219,6 +224,41 @@ def get_dma():
 def get_scan_size_axis(df):
     sizes = sorted(pd.to_numeric(df["size_nm"], errors="coerce").abs().dropna().unique())
     return np.asarray(sizes, dtype=float)
+
+
+def dmps_loss_correction_factor_from_distribution(dp_nm, n_inv, qa, temp, press):
+    dp_nm = np.asarray(dp_nm, dtype=float)
+    n_inv = np.asarray(n_inv, dtype=float)
+    mask = np.isfinite(dp_nm) & np.isfinite(n_inv) & (dp_nm > 0) & (n_inv > 0)
+    if not np.any(mask):
+        return 1.0
+
+    dp_m = dp_nm[mask] * 1e-9
+    n = n_inv[mask]
+    order = np.argsort(dp_m)
+    dp_m = dp_m[order]
+    n = n[order]
+
+    loss = (
+        ltubefl(dp_m, 1.93, qa, temp, press)
+        * ltubefl(dp_m, 4.80, 6.3 / 60000, temp, press)
+        * ltubefl(dp_m, 6.21, 1.3 / 60000, temp, press)
+        * cpc_loss1(dp_m, temp, press, cpc_type="HY09")
+        * dmps_loss1(dp_m, qa, temp, press)
+    )
+    if len(n) == 1:
+        if not np.isfinite(loss[0]) or loss[0] <= 0:
+            return 1.0
+        return 1.0 / loss[0]
+
+    total = trapezoid(n, np.log(dp_m))
+    if not np.isfinite(total) or total <= 0:
+        return 1.0
+
+    effective_transmission = trapezoid(n * loss, np.log(dp_m)) / total
+    if not np.isfinite(effective_transmission) or effective_transmission <= 0:
+        return 1.0
+    return 1.0 / effective_transmission
 
 import requests
 
@@ -805,6 +845,9 @@ def run_inversion_calculation(df):
             zratio = zratios.get(scan_id, np.nan)
             scan_parts = []
             ntot_scan = 0.0
+            temp = float(temp_K.value)
+            press = float(press_Pa.value)
+            qa = float(qa_lpm.value) / 60000.0
 
             ntot_rows = g_scan[g_scan["Ntot"] == True].copy()
             ntot_rows["cpc_float"] = pd.to_numeric(ntot_rows["cpc_count"], errors="coerce")
@@ -816,8 +859,8 @@ def run_inversion_calculation(df):
                     g_range,
                     polarity=polarity,
                     zratio=zratio,
-                    temp=float(temp_K.value),
-                    press=float(press_Pa.value),
+                    temp=temp,
+                    press=press,
                 )
 
                 if invdf.empty:
@@ -843,6 +886,14 @@ def run_inversion_calculation(df):
                     np.log10(dp_inv),
                     n_inv,
                 )
+
+            measured_ntot *= dmps_loss_correction_factor_from_distribution(
+                size_axis,
+                full_col,
+                qa,
+                temp,
+                press,
+            )
 
             heat_cols.append(full_col)
             heat_times.append(g_scan["time"].median())
@@ -928,8 +979,6 @@ def plot_inversion_result(result):
             
 
             if "y_measured" in tr and tr['polarity'] == "positive":
-                from inv_funcs.ltubefl import ltubefl
-                y=tr["y_measured"] / ltubefl(20e-9, 3, 6.5/60000, 297.15, 101325)
                 fig.add_scatter(
                     x=tr["x"],
                     y=tr["y_measured"],
@@ -949,7 +998,7 @@ def plot_inversion_result(result):
                     totalconc["time"].between(t0, t1)
                 ].copy()
                 
-                totalconc["SMEARIII_CPC"] = totalconc["SMEARIII_CPC"]/2
+                totalconc["SMEARIII_CPC"] = totalconc["SMEARIII_CPC"]
                 
                 fig.add_scatter(
                     x=totalconc["time"],
@@ -1054,6 +1103,23 @@ def auto_refresh_invert_save():
     if not auto_checkbox.value:
         return
 
+    signature = prepare_auto_selection()
+    if signature is None:
+        return
+
+    with inversion_lock:
+        running = inversion_running
+
+    if running:
+        status.object = "Auto-run: inversion already running."
+        return
+
+    auto_pending_signature = signature
+    status.object = "Auto-run: new scans detected, running inversion."
+    run_inversion()
+
+
+def prepare_auto_selection():
     min_age = max(0, int(auto_file_age_sec.value))
     files = list_scan_files(min_age_sec=min_age)
 
@@ -1071,18 +1137,43 @@ def auto_refresh_invert_save():
 
     if signature == state.get("last_saved_signature"):
         status.object = "Auto-run: no new selected scans."
-        return
+        return None
 
-    with inversion_lock:
-        running = inversion_running
+    return signature
 
-    if running:
-        status.object = "Auto-run: inversion already running."
-        return
 
-    auto_pending_signature = signature
-    status.object = "Auto-run: new scans detected, running inversion."
-    run_inversion()
+def run_auto_worker():
+    global latest_inversion
+
+    print("Auto inversion worker started. Press Ctrl+C to stop.", flush=True)
+
+    while True:
+        try:
+            signature = prepare_auto_selection()
+
+            if signature is not None:
+                print("Auto-run: new scans detected, running inversion.", flush=True)
+                plot_selected_scans()
+                df = load_selected_scans()
+                if df.empty:
+                    print("Auto-run: selected scans could not be loaded.", flush=True)
+                    continue
+
+                result = run_inversion_calculation(df)
+
+                latest_inversion = result
+                plot_inversion_result(result)
+                save_data()
+                save_auto_state({"last_saved_signature": signature})
+                print(str(status.object), flush=True)
+
+        except KeyboardInterrupt:
+            print("Auto inversion worker stopped.", flush=True)
+            return
+        except Exception:
+            traceback.print_exc()
+
+        time.sleep(max(1, int(auto_interval_min.value)) * 60)
 
 save_button.on_click(save_data)
 invert_button.on_click(run_inversion)
@@ -1141,3 +1232,7 @@ def update_auto_period(event):
 
 auto_interval_min.param.watch(update_auto_period, "value")
 layout.servable()
+
+
+if __name__ == "__main__" and "--auto-worker" in sys.argv:
+    run_auto_worker()
