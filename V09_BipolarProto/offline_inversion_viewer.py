@@ -46,6 +46,10 @@ DEFAULT_SETTINGS = {
     "temp_K": 293.15,
     "press_Pa": 101325,
     "zratio": 1.35e-4 / 1.60e-4,
+    "zratio_min": 0.3,
+    "zratio_max": 3.0,
+    "zratio_smoothing_step": 0.2,
+    "ntot_plot_max": 10000,
     "heatmap_clip": 20000,
     "smallest_size": 6.5,
 }
@@ -116,7 +120,12 @@ def save_settings():
         "temp_K": float(temp_K.value),
         "press_Pa": float(press_Pa.value),
         "zratio": float(zratio_widget.value),
+        "zratio_min": float(zratio_min_widget.value),
+        "zratio_max": float(zratio_max_widget.value),
+        "zratio_smoothing_step": float(zratio_smoothing_step.value),
+        "ntot_plot_max": float(ntot_plot_max.value),
         "heatmap_clip": float(heatmap_clip.value),
+        "smallest_size": float(smallest_size.value),
     }
     SETTINGS_FILE.write_text(json.dumps(settings, indent=2))
 
@@ -177,7 +186,8 @@ def save_data(event=None):
         elif tr["kind"] == "ion_ratio":
             ion_ratio_df = pd.DataFrame({
                 "time": pd.to_datetime(tr["x"]),
-                "Zp_Zn": tr["y"],
+                "Zp_Zn_raw": tr["y"],
+                "Zp_Zn_smoothed": tr.get("y_smoothed", tr["y"]),
                 "selected_dp_nm": tr["selected_dp"],
             })
             ion_ratio_df = ion_ratio_df.set_index("time").sort_index()
@@ -261,9 +271,9 @@ def dmps_loss_correction_factor_from_distribution(dp_nm, n_inv, qa, temp, press)
     n = n[order]
 
     loss = (
-        ltubefl(dp_m, 1.93, qa, temp, press)
-        * ltubefl(dp_m, 4.80, 6.3 / 60000, temp, press)
-        * ltubefl(dp_m, 6.21, 1.3 / 60000, temp, press)
+        ltubefl(dp_m, 1.53, qa, temp, press)
+        * ltubefl(dp_m, 2.80, 9.3 / 60000, temp, press)
+        * ltubefl(dp_m, 2.21, 1.3 / 60000, temp, press)
         * cpc_loss1(dp_m, temp, press, cpc_type="HY09")
         * dmps_loss1(dp_m, qa, temp, press)
     )
@@ -312,6 +322,136 @@ def load_smeariii_cpc_concentration(start, end):
     df["time"] = pd.to_datetime(df["time"])
     df["SMEARIII_CPC"] = pd.to_numeric(df["SMEARIII_CPC"], errors="coerce")
     return df[["time", "SMEARIII_CPC"]]
+
+
+def load_smeariii_sum_file(path):
+    rows = []
+    with Path(path).open() as file:
+        lines = [line.strip() for line in file if line.strip()]
+
+    i = 2
+    while i + 1 < len(lines):
+        size_parts = lines[i].split()
+        conc_parts = lines[i + 1].split()
+        i += 2
+
+        if len(size_parts) < 10 or len(conc_parts) != len(size_parts):
+            continue
+
+        try:
+            scan_time = pd.Timestamp(
+                year=int(size_parts[0]),
+                month=int(size_parts[1]),
+                day=int(size_parts[2]),
+                hour=int(size_parts[3]),
+                minute=int(size_parts[4]),
+                second=int(size_parts[5]),
+            )
+            sizes = np.asarray(size_parts[9:], dtype=float)
+            concs = np.asarray(conc_parts[9:], dtype=float)
+        except ValueError:
+            continue
+
+        for size_nm, conc in zip(sizes, concs):
+            rows.append((scan_time, size_nm, conc))
+
+    return pd.DataFrame(rows, columns=["time", "size_nm", "smear_conc"])
+
+
+def load_smeariii_sum_range(start, end):
+    start = pd.to_datetime(start)
+    end = pd.to_datetime(end)
+    root = Path("SMEARIII")
+    tables = []
+
+    for day in pd.date_range(start.normalize(), end.normalize(), freq="D"):
+        path = root / f"DMPS007_{day:%Y%m%d}.sum"
+        if path.exists():
+            tables.append(load_smeariii_sum_file(path))
+
+    if not tables:
+        return pd.DataFrame(columns=["time", "size_nm", "smear_conc"])
+
+    df = pd.concat(tables, ignore_index=True)
+    df = df[df["time"].between(start, end)].copy()
+    if df.empty:
+        return pd.DataFrame(columns=["time", "size_nm", "smear_conc"])
+
+    return df.sort_values(["time", "size_nm"])
+
+
+def build_scan_smeariii_comparison_heatmaps(result):
+    heatmaps = [tr for tr in result if tr["kind"] == "heatmap"]
+    if not heatmaps:
+        return {}
+
+    times = pd.to_datetime([t for tr in heatmaps for t in tr["x"]])
+    if len(times) == 0:
+        return {}
+
+    smear = load_smeariii_sum_range(
+        times.min() - pd.Timedelta(minutes=15),
+        times.max() + pd.Timedelta(minutes=15),
+    )
+    if smear.empty:
+        return {}
+
+    smear_times = pd.to_datetime(sorted(smear["time"].unique()))
+    comparisons = {}
+    for tr in heatmaps:
+        our_rows = []
+        sizes = np.asarray(tr["y"], dtype=float)
+        z = np.asarray(tr["Z"], dtype=float)
+        for t, col in zip(pd.to_datetime(tr["x"]), z.T):
+            for size_nm, conc in zip(sizes, col):
+                if np.isfinite(size_nm) and np.isfinite(conc):
+                    our_rows.append((t, size_nm, conc))
+
+        if not our_rows:
+            continue
+
+        our = pd.DataFrame(our_rows, columns=["time", "size_nm", "our_conc"])
+        our = our.groupby(["time", "size_nm"], as_index=False)["our_conc"].mean()
+        our_times = sorted(our["time"].unique())
+        sizes = np.asarray(sorted(our["size_nm"].unique()), dtype=float)
+        ratio_cols = []
+
+        for t in our_times:
+            t = pd.Timestamp(t)
+            deltas = np.abs(smear_times - t)
+            if len(deltas) == 0 or deltas.min() > pd.Timedelta(minutes=15):
+                ratio_cols.append(np.full(len(sizes), np.nan))
+                continue
+
+            smear_scan = smear[smear["time"] == smear_times[np.argmin(deltas)]]
+            smear_sizes = smear_scan["size_nm"].to_numpy(dtype=float)
+            smear_conc = smear_scan["smear_conc"].to_numpy(dtype=float)
+            order = np.argsort(smear_sizes)
+            smear_sizes = smear_sizes[order]
+            smear_conc = smear_conc[order]
+            valid = np.isfinite(smear_sizes) & np.isfinite(smear_conc) & (smear_conc > 0)
+            if np.count_nonzero(valid) < 2:
+                ratio_cols.append(np.full(len(sizes), np.nan))
+                continue
+
+            our_scan = our[our["time"] == t].set_index("size_nm").reindex(sizes)
+            our_conc = our_scan["our_conc"].to_numpy(dtype=float)
+            interp = np.interp(
+                sizes,
+                smear_sizes[valid],
+                smear_conc[valid],
+                left=np.nan,
+                right=np.nan,
+            )
+            ratio_cols.append(our_conc / interp)
+
+        comparisons[tr["polarity"]] = {
+            "x": [pd.Timestamp(t) for t in our_times],
+            "y": sizes,
+            "z": np.clip(np.column_stack(ratio_cols), 0, 2),
+        }
+
+    return comparisons
 
 
 def list_scan_files(min_age_sec=0):
@@ -449,9 +589,36 @@ zratio_widget = pn.widgets.FloatInput(
     value=float(settings.get("zratio", DEFAULT_SETTINGS["zratio"])),
     step=0.01,
 )
+zratio_min_widget = pn.widgets.FloatInput(
+    name="Zp/Zn min",
+    value=float(settings.get("zratio_min", DEFAULT_SETTINGS["zratio_min"])),
+    step=0.01,
+)
+zratio_max_widget = pn.widgets.FloatInput(
+    name="Zp/Zn max",
+    value=float(settings.get("zratio_max", DEFAULT_SETTINGS["zratio_max"])),
+    step=0.01,
+)
+zratio_smoothing_step = pn.widgets.FloatInput(
+    name="Zp/Zn max step",
+    value=float(settings.get(
+        "zratio_smoothing_step",
+        DEFAULT_SETTINGS["zratio_smoothing_step"],
+    )),
+    step=0.05,
+)
 use_zratio_checkbox = pn.widgets.Checkbox(name="Use Zp/Zn from settings", value=False)
 
-smallest_size = pn.widgets.FloatInput(name="Smallest size (nm)", value=6.5, step=0.1)
+smallest_size = pn.widgets.FloatInput(
+    name="Smallest size (nm)",
+    value=float(settings.get("smallest_size", DEFAULT_SETTINGS["smallest_size"])),
+    step=0.1,
+)
+ntot_plot_max = pn.widgets.FloatInput(
+    name="Ntot plot max",
+    value=float(settings.get("ntot_plot_max", DEFAULT_SETTINGS["ntot_plot_max"])),
+    step=1000,
+)
 heatmap_clip = pn.widgets.FloatInput(
     name="Heatmap clip",
     value=float(settings.get("heatmap_clip", 20000)),
@@ -564,17 +731,47 @@ def plot_selected_scans(event=None):
         ],
     )
 
-    for (scan_id, polarity), g in df.groupby(["scan_id", "polarity"]):
-        g = g.sort_values("abs_size_nm")
+    df_for_size_summary = df.copy()
+    df_for_size_summary["size_bin_nm"] = df_for_size_summary["abs_size_nm"].round(1)
+    size_summary = (
+        df_for_size_summary.groupby(["size_bin_nm", "polarity"])
+        .agg(
+            abs_size_nm=("abs_size_nm", "mean"),
+            mean=("cpc_float", "mean"),
+            std=("cpc_float", "std"),
+            count=("cpc_float", "size"),
+        )
+        .reset_index()
+        .sort_values("abs_size_nm")
+    )
+    size_summary["error"] = size_summary["std"].fillna(0)
 
+    for polarity, g in size_summary.groupby("polarity"):
         fig.add_scatter(
             x=g["abs_size_nm"],
-            y=g["cpc_float"],
+            y=g["mean"],
+            error_y=dict(
+                type="data",
+                array=g["error"],
+                visible=True,
+                thickness=1.5,
+                width=4,
+            ),
             mode="lines+markers",
-            name=f"{scan_id} {polarity}",
+            name=f"{polarity} mean +/- std",
+            customdata=np.column_stack((g["error"], g["count"])),
+            hovertemplate=(
+                "dp=%{x:.2f} nm<br>"
+                "mean=%{y:.2f}<br>"
+                "std=%{customdata[0]:.2f}<br>"
+                "n=%{customdata[1]:.0f}<extra></extra>"
+            ),
             row=1,
             col=1,
         )
+
+    for (scan_id, polarity), g in df.groupby(["scan_id", "polarity"]):
+        g = g.sort_values("abs_size_nm")
 
         fig.add_scatter(
             x=g["time"],
@@ -794,6 +991,42 @@ def estimate_ion_mobility_ratio_for_scan(g_scan, temp=293.15, press=101325):
     return np.nan, np.nan
 
 
+def smooth_ion_ratio_points(ion_points):
+    max_step = float(zratio_smoothing_step.value)
+    fallback = float(zratio_widget.value)
+    zmin = float(zratio_min_widget.value)
+    zmax = float(zratio_max_widget.value)
+    if zmin > zmax:
+        zmin, zmax = zmax, zmin
+
+    def ratio_for_use(raw):
+        if not np.isfinite(raw):
+            return fallback
+        if np.isfinite(zmin) and raw < zmin:
+            return fallback
+        if np.isfinite(zmax) and raw > zmax:
+            return fallback
+        return raw
+
+    if max_step <= 0:
+        return [(t, raw, ratio_for_use(raw), dp, scan_id) for t, raw, dp, scan_id in ion_points]
+
+    smoothed_points = []
+    previous = np.nan
+    for t, raw, dp, scan_id in sorted(ion_points, key=lambda x: x[0]):
+        used = ratio_for_use(raw)
+        if np.isfinite(previous):
+            delta = used - previous
+            smoothed = previous + np.clip(delta, -max_step, max_step)
+        else:
+            smoothed = used
+
+        smoothed_points.append((t, raw, smoothed, dp, scan_id))
+        previous = smoothed
+
+    return smoothed_points
+
+
 def invert_one_scan(d, polarity, zratio=None, temp=293.15, press=101325):
     d = d.copy()
     d = d[d["Ntot"] == False]
@@ -841,8 +1074,8 @@ def invert_one_scan(d, polarity, zratio=None, temp=293.15, press=101325):
     if zratio is None or not np.isfinite(zratio) or use_zratio_checkbox.value:
         zratio = float(zratio_widget.value)
 
-    zn = 1e-4
-    zp = zratio * zn
+    zp = 1e-4
+    zn = zratio * zp
 
     for i, dp_nm in enumerate(dp_meas_nm):
         voltage = voltage_from_size(
@@ -866,7 +1099,7 @@ def invert_one_scan(d, polarity, zratio=None, temp=293.15, press=101325):
         )
 
         vals = inv.intfun(gl_pts, *args).reshape(len(dp_grid_nm), len(_GL_NODES))
-        A[i, :] = 0.5 * vals @ _GL_WEIGHTS
+        A[i, :] = halfs * (vals @ _GL_WEIGHTS)
 
     x, _ = nnls(A, y)
 
@@ -895,9 +1128,13 @@ def run_inversion_calculation(df):
             temp=float(temp_K.value),
             press=float(press_Pa.value),
         )
-        zratios[scan_id] = 1/zratio
         if np.isfinite(zratio):
             ion_points.append((g_scan["time"].median(), zratio, selected_dp, scan_id))
+
+    ion_points = smooth_ion_ratio_points(ion_points)
+    for _, _, smoothed_zratio, _, scan_id in ion_points:
+        if np.isfinite(smoothed_zratio) and smoothed_zratio != 0:
+            zratios[scan_id] = smoothed_zratio
 
     for polarity in ["positive", "negative"]:
         dd = df[df["polarity"] == polarity].copy()
@@ -935,9 +1172,8 @@ def run_inversion_calculation(df):
                 dp_inv = invdf["abs_size_nm"].to_numpy(dtype=float)
                 n_inv = invdf["N_GWalpha"].to_numpy(dtype=float)
 
-                ntot_scan += np.trapezoid(n_inv)
-
                 order = np.argsort(dp_inv)
+                ntot_scan += np.trapezoid(n_inv[order], np.log10(dp_inv[order]))
                 scan_parts.append((dp_inv[order], n_inv[order]))
 
             if not scan_parts:
@@ -963,6 +1199,9 @@ def run_inversion_calculation(df):
 
             heat_cols.append(full_col)
             heat_times.append(g_scan["time"].median())
+            ntot_limit = float(ntot_plot_max.value)
+            if np.isfinite(ntot_limit) and ntot_limit > 0 and ntot_scan > ntot_limit:
+                ntot_scan = np.nan
             ntot_vals.append(ntot_scan)
             ntot_measured.append(measured_ntot)
 
@@ -989,8 +1228,9 @@ def run_inversion_calculation(df):
         "kind": "ion_ratio",
         "x": [x[0] for x in ion_points],
         "y": [x[1] for x in ion_points],
-        "selected_dp": [x[2] for x in ion_points],
-        "scan_id": [x[3] for x in ion_points],
+        "y_smoothed": [x[2] for x in ion_points],
+        "selected_dp": [x[3] for x in ion_points],
+        "scan_id": [x[4] for x in ion_points],
     })
 
     return output
@@ -998,15 +1238,17 @@ def run_inversion_calculation(df):
 
 def plot_inversion_result(result):
     fig = make_subplots(
-        rows=4,
+        rows=6,
         cols=1,
         shared_xaxes=False,
-        vertical_spacing=0.08,
+        vertical_spacing=0.05,
         subplot_titles=[
             "Positive inverted heatmap",
             "Negative inverted heatmap",
             "Ntot",
-            "Estimated Zp/Zn",
+            "Estimated Zn/Zp ratio",
+            "Positive our / SMEAR III SMPS ratio",
+            "Negative our / SMEAR III SMPS ratio",
         ],
     )
 
@@ -1022,7 +1264,7 @@ def plot_inversion_result(result):
                 zmin=0,
                 zmax=float(heatmap_clip.value),
                 name=f"{tr['polarity']} heatmap",
-                colorbar=dict(title=tr["polarity"], len=0.35),
+                colorbar=dict(title="dN/dlog10Dp", len=0.35),
                 row=row,
                 col=1,
             )
@@ -1077,24 +1319,57 @@ def plot_inversion_result(result):
             
 
         elif tr["kind"] == "ion_ratio":
+            zmin = float(zratio_min_widget.value)
+            zmax = float(zratio_max_widget.value)
+            if zmin > zmax:
+                zmin, zmax = zmax, zmin
             fig.add_scatter(
                 x=tr["x"],
-                y=np.clip(tr["y"], 0.3, 3.0),
+                y=np.clip(tr["y"], zmin, zmax),
                 mode="lines+markers",
-                name="Zp/Zn",
-                customdata=np.array(tr["selected_dp"]),
-                hovertemplate="Zp/Zn=%{y:.3f}<br>dp=%{customdata:.1f} nm<extra></extra>",
+                name="Zn/Zp raw",
+                customdata=np.column_stack((tr["y"], tr["selected_dp"])),
+                hovertemplate="raw Zn/Zp=%{customdata[0]:.3f}<br>dp=%{customdata[1]:.1f} nm<extra></extra>",
                 row=4,
                 col=1,
             )
+            if "y_smoothed" in tr:
+                fig.add_scatter(
+                    x=tr["x"],
+                    y=np.clip(tr["y_smoothed"], zmin, zmax),
+                    mode="lines+markers",
+                    name="Zn/Zp smoothed (used)",
+                    customdata=np.column_stack((tr["y_smoothed"], tr["selected_dp"])),
+                    hovertemplate="smoothed Zn/Zp=%{customdata[0]:.3f}<br>dp=%{customdata[1]:.1f} nm<extra></extra>",
+                    row=4,
+                    col=1,
+                )
 
     fig.update_yaxes(title_text="Ntot", row=3, col=1)
     fig.update_xaxes(title_text="Time", tickformat="%H:%M", row=3, col=1)
-    fig.update_yaxes(title_text="Zp/Zn", row=4, col=1)
+    fig.update_yaxes(title_text="Zn/Zp", row=4, col=1)
     fig.update_xaxes(title_text="Time", tickformat="%H:%M", row=4, col=1)
 
+    comparisons = build_scan_smeariii_comparison_heatmaps(result)
+    for polarity, row in [("positive", 5), ("negative", 6)]:
+        comparison = comparisons.get(polarity)
+        if comparison is not None:
+            fig.add_heatmap(
+                z=comparison["z"],
+                x=comparison["x"],
+                y=comparison["y"],
+                zmin=0,
+                zmax=1.3,
+                name=f"{polarity} / SMEAR III",
+                colorbar=dict(title="ratio", len=0.25),
+                row=row,
+                col=1,
+            )
+        fig.update_xaxes(title_text="Time", tickformat="%H:%M", row=row, col=1)
+        fig.update_yaxes(type="log", title_text="dp (nm)", row=row, col=1)
+
     fig.update_layout(
-        height=850,
+        height=1250,
         width=1300,
         title="Offline inversion result",
         showlegend=True,
@@ -1273,6 +1548,10 @@ for w in [
     temp_K,
     press_Pa,
     zratio_widget,
+    zratio_min_widget,
+    zratio_max_widget,
+    zratio_smoothing_step,
+    ntot_plot_max,
     heatmap_clip,
     smallest_size,
 ]:
@@ -1288,7 +1567,8 @@ layout = pn.Column(
     "### DMA / inversion settings",
     pn.Row(dma_L, dma_r1, dma_r2),
     pn.Row(qa_lpm, qs_lpm, temp_K, press_Pa),
-    pn.Row(zratio_widget, use_zratio_checkbox, heatmap_clip, smallest_size),
+    pn.Row(zratio_widget, zratio_min_widget, zratio_max_widget, zratio_smoothing_step, use_zratio_checkbox),
+    pn.Row(ntot_plot_max, heatmap_clip, smallest_size),
     pn.Row(plot_button, invert_button, save_button, status),
     "## Raw scans",
     raw_plot,
