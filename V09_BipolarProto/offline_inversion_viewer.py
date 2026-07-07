@@ -1359,7 +1359,12 @@ def plot_inversion_result(result):
                 x=comparison["x"],
                 y=comparison["y"],
                 zmin=0,
-                zmax=1.3,
+                zmax=2,
+                colorscale=[
+                    [0.0, "#2c7bb6"],
+                    [0.5, "#ffffbf"],
+                    [1.0, "#d7191c"],
+                ],
                 name=f"{polarity} / SMEAR III",
                 colorbar=dict(title="ratio", len=0.25),
                 row=row,
