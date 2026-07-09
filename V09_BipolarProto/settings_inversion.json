@@ -13,5 +13,14 @@
   "temp_K": 293.15,
   "press_Pa": 101325.0,
   "zratio": 1.0,
-  "heatmap_clip": 1000.0
+  "zratio_min": 0.3,
+  "zratio_max": 3.0,
+  "zratio_smoothing_step": 0.2,
+  "ntot_plot_max": 10000.0,
+  "heatmap_clip": 1000.0,
+  "smallest_size": 6.5,
+  "inversion_methods": [
+    "gunn woessner mod",
+    "wiedensohler"
+  ]
 }

@@ -25,7 +25,7 @@ def cpc_loss1(dp, temp, press, cpc_type=3010):
     # The CPC type 3025,3022 or 3010
     
     # For TSI3010 you can give two elevated temperatures 25degC and 21degC
-    TD = 25
+    TD = 21
     
     if cpc_type == 3772:
         # Ift calibration Td=29degC

@@ -23,14 +23,14 @@ def intfun(dp, t, press, p, volt, pituus, arkaksi, aryksi, qa, qc, qm, qs,
 
     # Laminar flow tube losses
     tubeloss = ltubefl(dp, pipelength, pipeflow, t, press)
-    tubeloss2 = ltubefl(dp, 2.80, 9.3/60000, t, press)
-    tubeloss3 = ltubefl(dp, 2.21, 1.3/60000, t, press)
+    tubeloss2 = ltubefl(dp, 2.80, 8/60000, t, press)
+    tubeloss3 = ltubefl(dp, 5.21, 1.3/60000, t, press)
     
     tubeloss = tubeloss * tubeloss2 * tubeloss3
     
 
     if lsys == 1:
-        cpcloss = cpc_loss1(dp, t, press, cpc_type="HY09")
+        cpcloss = cpc_loss1(dp, t, press, cpc_type=3010)
     else:
         cpcloss = cpc_loss2(dp, t, press)
 
@@ -63,7 +63,6 @@ def intfun(dp, t, press, p, volt, pituus, arkaksi, aryksi, qa, qc, qm, qs,
         print(len(dp))
 
         for i in range(len(dp)):
-            print(f"Calculating charge fraction for dp = {dp[i]:.3e} m")
             frac, beta_p, beta_n = calChargeFracF(
                 dp[i], Zp, Zn, Mrp, Mrn,
                 Np=Np, Nn=Nn, epsp=1000, T=t, P=press
