@@ -29,7 +29,8 @@ from inv_funcs.ltubefl import ltubefl
 # Settings / constants
 # ---------------------------------------------------------------------
 
-SETTINGS_FILE = Path("settings_inversion.json")
+APP_ROOT = Path(__file__).resolve().parents[1]
+SETTINGS_FILE = APP_ROOT / "settings_inversion.json"
 APP_VERSION = "2026-07-09-original-inversion-convention"
 
 DEFAULT_SETTINGS = {
@@ -72,7 +73,7 @@ inversion_lock = threading.Lock()
 inversion_running = False
 latest_inversion = None
 auto_pending_signature = None
-AUTO_STATE_FILE = Path("auto_inversion_state.json")
+AUTO_STATE_FILE = APP_ROOT / "auto_inversion_state.json"
 SHARED_STATE_KEY = "offline_inversion_viewer_shared_state"
 shared_state = pn.state.cache.setdefault(
     SHARED_STATE_KEY,
@@ -159,11 +160,18 @@ def _json_safe(value):
         return {k: _json_safe(v) for k, v in value.items()}
     return value
 
+
+def app_path(value):
+    path = Path(value).expanduser()
+    if path.is_absolute():
+        return path
+    return APP_ROOT / path
+
 def save_data(event=None):
     if latest_inversion is None:
         status.object = "No inversion data to save yet."
         return
-    outdir = Path(save_root.value).expanduser()
+    outdir = app_path(save_root.value)
     outdir.mkdir(parents=True, exist_ok=True)
     if daily_overwrite_checkbox.value:
         stamp = pd.Timestamp.now().strftime("%Y%m%d")
@@ -499,7 +507,7 @@ def build_scan_smeariii_comparison_heatmaps(result):
 
 
 def list_scan_files(min_age_sec=0):
-    root = Path(scan_root.value).expanduser()
+    root = app_path(scan_root.value)
     files = root.glob("*/*.csv")
 
     if min_age_sec > 0:
@@ -751,7 +759,7 @@ def sync_shared_state():
 # ---------------------------------------------------------------------
 
 def refresh_scan_files(event=None):
-    root = Path(scan_root.value).expanduser()
+    root = app_path(scan_root.value)
     files = list_scan_files()
 
     print("cwd:", Path.cwd(), flush=True)
