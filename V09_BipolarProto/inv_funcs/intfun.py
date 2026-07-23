@@ -10,7 +10,7 @@ from .calChargeFracF import calChargeFracF
 
 def intfun(dp, t, press, p, volt, pituus, arkaksi, aryksi, qa, qc, qm, qs,
            pipelength, pipeflow, lsys, Zp, Zn, Mrp, Mrn, Np, Nn,
-           charging_efficiency, summed):
+           charging_efficiency, summed, tube_segments=None):
     """
     Main function for transfer function calculations.
 
@@ -21,12 +21,20 @@ def intfun(dp, t, press, p, volt, pituus, arkaksi, aryksi, qa, qc, qm, qs,
     scalar_input = np.ndim(dp) == 0
     dp = np.atleast_1d(10.0 ** np.asarray(dp, dtype=float))
 
-    # Laminar flow tube losses
-    tubeloss = ltubefl(dp, pipelength, pipeflow, t, press)
-    tubeloss2 = ltubefl(dp, 2.80, 8/60000, t, press)
-    tubeloss3 = ltubefl(dp, 5.21, 1.3/60000, t, press)
-    
-    tubeloss = tubeloss * tubeloss2 * tubeloss3
+    # Laminar flow tube losses. Diameter and angle may be carried in
+    # tube_segments for bookkeeping, but ltubefl currently uses length/flow.
+    if tube_segments is None:
+        tube_segments = (
+            (np.nan, pipelength, pipeflow, 0.0),
+            (np.nan, 2.80, 8 / 60000, 0.0),
+            (np.nan, 5.21, 1.3 / 60000, 0.0),
+        )
+
+    tubeloss = np.ones_like(dp, dtype=float)
+    for segment in tube_segments:
+        _, length, flow, *_ = segment
+        if np.isfinite(length) and np.isfinite(flow) and length > 0 and flow > 0:
+            tubeloss *= ltubefl(dp, length, flow, t, press)
     
 
     if lsys == 1:

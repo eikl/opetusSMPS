@@ -57,6 +57,7 @@ DEFAULT_SETTINGS = {
     "heatmap_clip": 20000,
     "smallest_size": 6.5,
     "inversion_methods": ["gunn woessner mod"],
+    "tube_segments": "tubediameter,tubelength,aflow,angle\n0,1.93,qa,0\n0,2.80,8,0\n0,5.21,1.3,0",
 }
 
 INVERSION_METHODS = {
@@ -141,6 +142,7 @@ def save_settings():
         "heatmap_clip": float(heatmap_clip.value),
         "smallest_size": float(smallest_size.value),
         "inversion_methods": selected_inversion_methods(),
+        "tube_segments": tube_segments.value,
     }
     SETTINGS_FILE.write_text(json.dumps(settings, indent=2))
 
@@ -305,11 +307,71 @@ def selected_inversion_methods():
     return methods or DEFAULT_SETTINGS["inversion_methods"]
 
 
+def parse_tube_segments(text, qa, qs=None, qc=None, qm=None):
+    flow_names = {
+        "qa": qa,
+        "aflow": qa,
+        "aerosol": qa,
+        "aerosolflow": qa,
+        "qs": qs,
+        "sample": qs,
+        "sampleflow": qs,
+        "qc": qc,
+        "sheath": qc,
+        "sheathflow": qc,
+        "qm": qm,
+    }
+    segments = []
+
+    for line_no, raw_line in enumerate(str(text).splitlines(), start=1):
+        line = raw_line.split("#", 1)[0].strip()
+        if not line:
+            continue
+
+        parts = [part.strip() for part in line.replace(";", ",").split(",")]
+        if len(parts) < 3:
+            raise ValueError(f"Tube segment line {line_no}: expected diameter,length,flow[,angle]")
+
+        try:
+            diameter = float(parts[0])
+            length = float(parts[1])
+        except ValueError:
+            if line_no == 1:
+                continue
+            raise ValueError(f"Tube segment line {line_no}: diameter and length must be numbers")
+
+        flow_key = parts[2].lower().replace("_", "")
+        if flow_key in flow_names and flow_names[flow_key] is not None:
+            flow = float(flow_names[flow_key])
+        else:
+            try:
+                flow = float(parts[2]) / 60000.0
+            except ValueError as exc:
+                raise ValueError(
+                    f"Tube segment line {line_no}: flow must be L/min or one of qa, qs, qc, qm"
+                ) from exc
+
+        try:
+            angle = float(parts[3]) if len(parts) > 3 and parts[3] else 0.0
+        except ValueError as exc:
+            raise ValueError(f"Tube segment line {line_no}: angle must be numeric") from exc
+
+        if length <= 0 or flow <= 0:
+            raise ValueError(f"Tube segment line {line_no}: length and flow must be positive")
+
+        segments.append((diameter, length, flow, angle))
+
+    if not segments:
+        raise ValueError("Tube segments cannot be empty")
+
+    return tuple(segments)
+
+
 def method_label(method):
     return INVERSION_METHODS.get(method, method)
 
 
-def dmps_loss_correction_factor_from_distribution(dp_nm, n_inv, qa, temp, press):
+def dmps_loss_correction_factor_from_distribution(dp_nm, n_inv, tube_segments, qa, temp, press):
     dp_nm = np.asarray(dp_nm, dtype=float)
     n_inv = np.asarray(n_inv, dtype=float)
     mask = np.isfinite(dp_nm) & np.isfinite(n_inv) & (dp_nm > 0) & (n_inv > 0)
@@ -322,13 +384,11 @@ def dmps_loss_correction_factor_from_distribution(dp_nm, n_inv, qa, temp, press)
     dp_m = dp_m[order]
     n = n[order]
 
-    loss = (
-        ltubefl(dp_m, 1.53, qa, temp, press)
-        * ltubefl(dp_m, 2.80, 9.3 / 60000, temp, press)
-        * ltubefl(dp_m, 2.21, 1.3 / 60000, temp, press)
-        * cpc_loss1(dp_m, temp, press, cpc_type=3010)
-        * dmps_loss1(dp_m, qa, temp, press)
-    )
+    tube_loss = np.ones_like(dp_m, dtype=float)
+    for _, length, flow, *_ in tube_segments:
+        tube_loss *= ltubefl(dp_m, length, flow, temp, press)
+
+    loss = tube_loss * cpc_loss1(dp_m, temp, press, cpc_type=3010) * dmps_loss1(dp_m, qa, temp, press)
     if len(n) == 1:
         if not np.isfinite(loss[0]) or loss[0] <= 0:
             return 1.0
@@ -691,6 +751,14 @@ heatmap_clip = pn.widgets.FloatInput(
     name="Heatmap clip",
     value=float(settings.get("heatmap_clip", 20000)),
     step=1000,
+)
+
+tube_segments = pn.widgets.TextAreaInput(
+    name="Tube segments: tubediameter,tubelength,aflow[,angle]",
+    value=str(settings.get("tube_segments", DEFAULT_SETTINGS["tube_segments"])),
+    height=120,
+    width=700,
+    placeholder="tubediameter,tubelength,aflow,angle\n0,1.93,qa,0\n0,2.80,8,0",
 )
 
 saved_methods = settings.get("inversion_methods", DEFAULT_SETTINGS["inversion_methods"])
@@ -1162,6 +1230,7 @@ def invert_one_scan(
     q_sheath_lpm = float(d["sheath_setpoint"].median())
     qc = q_sheath_lpm / 60000.0
     qm = qc + qa - qs
+    parsed_tube_segments = parse_tube_segments(tube_segments.value, qa=qa, qs=qs, qc=qc, qm=qm)
 
     if polarity == "positive":
         p = np.arange(-1, -6, -1, dtype=float)
@@ -1199,6 +1268,7 @@ def invert_one_scan(
             1e13, 1e13,
             inversion_method,
             0,
+            parsed_tube_segments,
         )
 
         vals = inv.intfun(gl_pts, *args).reshape(len(dp_grid_nm), len(_GL_NODES))
@@ -1255,6 +1325,17 @@ def run_inversion_calculation(df):
                 temp = float(temp_K.value)
                 press = float(press_Pa.value)
                 qa = float(qa_lpm.value) / 60000.0
+                qs = float(qs_lpm.value) / 60000.0
+                q_sheath_lpm = float(g_scan["sheath_setpoint"].median())
+                qc = q_sheath_lpm / 60000.0
+                qm = qc + qa - qs
+                parsed_tube_segments = parse_tube_segments(
+                    tube_segments.value,
+                    qa=qa,
+                    qs=qs,
+                    qc=qc,
+                    qm=qm,
+                )
 
                 ntot_rows = g_scan[g_scan["Ntot"] == True].copy()
                 ntot_rows["cpc_float"] = pd.to_numeric(ntot_rows["cpc_count"], errors="coerce")
@@ -1296,6 +1377,7 @@ def run_inversion_calculation(df):
                 measured_ntot *= dmps_loss_correction_factor_from_distribution(
                     size_axis,
                     full_col,
+                    parsed_tube_segments,
                     qa,
                     temp,
                     press,
@@ -1689,6 +1771,7 @@ for w in [
     ntot_plot_max,
     heatmap_clip,
     smallest_size,
+    tube_segments,
     inversion_methods,
 ]:
     w.param.watch(lambda event: save_settings(), "value")
@@ -1704,6 +1787,7 @@ controls = pn.Column(
     pn.Row(qa_lpm, qs_lpm, temp_K, press_Pa),
     pn.Row(zratio_widget, zratio_min_widget, zratio_max_widget, zratio_smoothing_step, zratio_min_size_nm, zratio_estimate_offset, use_zratio_checkbox),
     pn.Row(ntot_plot_max, heatmap_clip, smallest_size),
+    tube_segments,
     inversion_methods,
     pn.Row(plot_button, invert_button, save_button, status),
 )
