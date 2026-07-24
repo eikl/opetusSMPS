@@ -473,7 +473,7 @@ def load_smeariii_sum_file(path):
 def load_smeariii_sum_range(start, end):
     start = pd.to_datetime(start)
     end = pd.to_datetime(end)
-    root = Path("SMEARIII")
+    root = APP_ROOT / "SMEARIII"
     tables = []
 
     for day in pd.date_range(start.normalize(), end.normalize(), freq="D"):
@@ -490,6 +490,110 @@ def load_smeariii_sum_range(start, end):
         return pd.DataFrame(columns=["time", "size_nm", "smear_conc"])
 
     return df.sort_values(["time", "size_nm"])
+
+
+def result_time_range(result):
+    times = []
+    for tr in result:
+        if tr.get("kind") in {"heatmap", "ntot"} and len(tr.get("x", [])) > 0:
+            times.extend(pd.to_datetime(tr["x"]))
+    if not times:
+        return None, None
+    times = pd.to_datetime(times)
+    return times.min(), times.max()
+
+
+def three_day_median_window(result):
+    t0, t1 = result_time_range(result)
+    if t0 is None:
+        return None, None
+    start = t0.normalize()
+    end = start + pd.Timedelta(days=3)
+    return start, end
+
+
+def build_median_distributions(result):
+    start, end = three_day_median_window(result)
+    medians = []
+
+    for tr in result:
+        if tr.get("kind") != "heatmap":
+            continue
+        z = np.asarray(tr["Z"], dtype=float)
+        if z.size == 0:
+            continue
+        if start is not None:
+            times = pd.to_datetime(tr["x"])
+            mask = (times >= start) & (times < end)
+            if not np.any(mask):
+                continue
+            z = z[:, mask]
+        medians.append({
+            "label": f"{method_label(tr.get('method', 'gunn woessner mod'))} {tr['polarity']}",
+            "dp": np.asarray(tr["y"], dtype=float),
+            "median": np.nanmedian(z, axis=1),
+        })
+
+    if start is None:
+        return medians
+
+    smear = load_smeariii_sum_range(start, end)
+    if not smear.empty:
+        scan_sizes = []
+        scan_concs = []
+        for _, smear_scan in smear.groupby("time"):
+            smear_scan = smear_scan.sort_values("size_nm")
+            size_nm = smear_scan["size_nm"].to_numpy(dtype=float)
+            conc = smear_scan["smear_conc"].to_numpy(dtype=float)
+            if len(size_nm) > 0:
+                scan_sizes.append(size_nm)
+                scan_concs.append(conc)
+
+        if scan_concs:
+            channel_count = max(set(map(len, scan_concs)), key=list(map(len, scan_concs)).count)
+            scan_sizes = [size_nm for size_nm in scan_sizes if len(size_nm) == channel_count]
+            scan_concs = [conc for conc in scan_concs if len(conc) == channel_count]
+            if scan_concs:
+                medians.append({
+                    "label": "SMEAR III SMPS",
+                    "dp": np.nanmedian(np.vstack(scan_sizes), axis=0),
+                    "median": np.nanmedian(np.vstack(scan_concs), axis=0),
+                })
+
+    return medians
+
+
+def load_smeariii_cpc_for_times(times):
+    times = pd.to_datetime(times)
+    if len(times) == 0:
+        return pd.DataFrame(columns=["time", "SMEARIII_CPC"])
+
+    t0 = times.min()
+    t1 = times.max()
+    totalconc = load_smeariii_cpc_concentration(
+        t0 - pd.Timedelta(hours=1),
+        t1 - pd.Timedelta(hours=1),
+    )
+    totalconc["time"] = totalconc["time"] + pd.Timedelta(hours=1)
+    return totalconc[totalconc["time"].between(t0, t1)].copy()
+
+
+def match_to_smeariii_cpc(times, values, smear_cpc):
+    df = pd.DataFrame({
+        "time": pd.to_datetime(times),
+        "value": pd.to_numeric(values, errors="coerce"),
+    }).dropna(subset=["time", "value"])
+    if df.empty or smear_cpc.empty:
+        return pd.DataFrame(columns=["time", "value", "SMEARIII_CPC"])
+
+    matched = pd.merge_asof(
+        df.sort_values("time"),
+        smear_cpc[["time", "SMEARIII_CPC"]].dropna().sort_values("time"),
+        on="time",
+        direction="nearest",
+        tolerance=pd.Timedelta(minutes=15),
+    )
+    return matched.dropna(subset=["value", "SMEARIII_CPC"])
 
 
 def build_scan_smeariii_comparison_heatmaps(result):
@@ -1427,12 +1531,25 @@ def plot_inversion_result(result):
     heatmap_keys = [(tr.get("method", "gunn woessner mod"), tr["polarity"]) for tr in heatmaps]
     comparisons = build_scan_smeariii_comparison_heatmaps(result)
     comparison_keys = [key for key in heatmap_keys if key in comparisons]
+    median_distributions = build_median_distributions(result)
+    result_t0, result_t1 = result_time_range(result)
+    smear_cpc = pd.DataFrame(columns=["time", "SMEARIII_CPC"])
+    if result_t0 is not None:
+        try:
+            smear_cpc = load_smeariii_cpc_for_times([result_t0, result_t1])
+        except Exception as e:
+            print(f"Could not load SMEAR III CPC for scatter plots: {e}", flush=True)
 
     subplot_titles = [
         f"{method_label(method)} {polarity} inverted heatmap"
         for method, polarity in heatmap_keys
     ]
     subplot_titles.extend(["Ntot", "Estimated Zn/Zp ratio"])
+    subplot_titles.extend([
+        "Three-day median dN/dlog10Dp",
+        "Our CPC Ntot vs SMEAR III CPC",
+        "Inverted Ntot vs SMEAR III CPC",
+    ])
     subplot_titles.extend(
         f"{method_label(method)} {polarity} our / SMEAR III SMPS ratio"
         for method, polarity in comparison_keys
@@ -1440,7 +1557,10 @@ def plot_inversion_result(result):
 
     ntot_row = len(heatmap_keys) + 1
     ion_ratio_row = ntot_row + 1
-    comparison_start_row = ion_ratio_row + 1
+    median_row = ion_ratio_row + 1
+    cpc_scatter_row = median_row + 1
+    inversion_scatter_row = cpc_scatter_row + 1
+    comparison_start_row = inversion_scatter_row + 1
     rows = len(subplot_titles)
     vertical_spacing = min(0.05, 0.8 / max(1, rows - 1))
 
@@ -1458,6 +1578,9 @@ def plot_inversion_result(result):
     }
     measured_ntot_added = False
     smear_cpc_added = False
+    cpc_scatter_added = False
+    scatter_max = 0.0
+    inversion_scatter_max = 0.0
 
     for tr in result:
         if tr["kind"] == "heatmap":
@@ -1504,27 +1627,48 @@ def plot_inversion_result(result):
                 )
                 measured_ntot_added = True
 
-                if not smear_cpc_added and len(tr["x"]) > 0:
-                    t0 = pd.to_datetime(tr["x"][0])
-                    t1 = pd.to_datetime(tr["x"][-1])
-                    totalconc = load_smeariii_cpc_concentration(
-                        t0 - pd.Timedelta(hours=1),
-                        t1 - pd.Timedelta(hours=1),
-                    )
-                    totalconc["time"] = totalconc["time"] + pd.Timedelta(hours=1)
-                    totalconc = totalconc[
-                        totalconc["time"].between(t0, t1)
-                    ].copy()
-
+                if not smear_cpc_added and not smear_cpc.empty:
                     fig.add_scatter(
-                        x=totalconc["time"],
-                        y=totalconc["SMEARIII_CPC"],
+                        x=smear_cpc["time"],
+                        y=smear_cpc["SMEARIII_CPC"],
                         mode="lines+markers",
                         name="SMEAR III CPC",
                         row=ntot_row,
                         col=1,
                     )
                     smear_cpc_added = True
+
+                if not cpc_scatter_added and "y_measured" in tr and tr["polarity"] == "positive":
+                    matched = match_to_smeariii_cpc(tr["x"], tr["y_measured"], smear_cpc)
+                    if not matched.empty:
+                        scatter_max = max(
+                            scatter_max,
+                            float(matched[["value", "SMEARIII_CPC"]].max().max()),
+                        )
+                        fig.add_scatter(
+                            x=matched["value"],
+                            y=matched["SMEARIII_CPC"],
+                            mode="markers",
+                            name="Our CPC vs SMEAR III CPC",
+                            row=cpc_scatter_row,
+                            col=1,
+                        )
+                        cpc_scatter_added = True
+
+            matched = match_to_smeariii_cpc(tr["x"], tr["y"], smear_cpc)
+            if not matched.empty:
+                inversion_scatter_max = max(
+                    inversion_scatter_max,
+                    float(matched[["value", "SMEARIII_CPC"]].max().max()),
+                )
+                fig.add_scatter(
+                    x=matched["value"],
+                    y=matched["SMEARIII_CPC"],
+                    mode="markers",
+                    name=f"{method_label(method)} {tr['polarity']} vs SMEAR III CPC",
+                    row=inversion_scatter_row,
+                    col=1,
+                )
 
         elif tr["kind"] == "ion_ratio":
             if len(tr["x"]) == 0:
@@ -1555,10 +1699,48 @@ def plot_inversion_result(result):
                     col=1,
                 )
 
+    for median in median_distributions:
+        fig.add_scatter(
+            x=median["dp"],
+            y=median["median"],
+            mode="lines+markers",
+            name=f"Median {median['label']}",
+            row=median_row,
+            col=1,
+        )
+
+    if scatter_max > 0:
+        fig.add_scatter(
+            x=[0, scatter_max],
+            y=[0, scatter_max],
+            mode="lines",
+            line=dict(color="black", dash="dash"),
+            name="1:1 CPC",
+            row=cpc_scatter_row,
+            col=1,
+        )
+
+    if inversion_scatter_max > 0:
+        fig.add_scatter(
+            x=[0, inversion_scatter_max],
+            y=[0, inversion_scatter_max],
+            mode="lines",
+            line=dict(color="black", dash="dash"),
+            name="1:1 inversion",
+            row=inversion_scatter_row,
+            col=1,
+        )
+
     fig.update_yaxes(title_text="Ntot", row=ntot_row, col=1)
     fig.update_xaxes(title_text="Time", tickformat="%H:%M", row=ntot_row, col=1)
     fig.update_yaxes(title_text="Zn/Zp", row=ion_ratio_row, col=1)
     fig.update_xaxes(title_text="Time", tickformat="%H:%M", row=ion_ratio_row, col=1)
+    fig.update_xaxes(type="log", title_text="Dp (nm)", row=median_row, col=1)
+    fig.update_yaxes(title_text="dN/dlog10Dp", row=median_row, col=1)
+    fig.update_xaxes(title_text="Our CPC Ntot", row=cpc_scatter_row, col=1)
+    fig.update_yaxes(title_text="SMEAR III CPC Ntot", row=cpc_scatter_row, col=1)
+    fig.update_xaxes(title_text="Inverted Ntot", row=inversion_scatter_row, col=1)
+    fig.update_yaxes(title_text="SMEAR III CPC Ntot", row=inversion_scatter_row, col=1)
 
     for key, row in comparison_rows.items():
         method, polarity = key
