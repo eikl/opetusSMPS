@@ -20,6 +20,7 @@ from numpy.polynomial.legendre import leggauss
 _GL_NODES, _GL_WEIGHTS = leggauss(5)
 
 import inv_funcs as inv
+from DMPS_inversion_gui import diagnostics as diag
 from inv_funcs.cpc_loss import cpc_loss1
 from inv_funcs.dmps_loss import dmps_loss1
 from inv_funcs.ltubefl import ltubefl
@@ -55,6 +56,12 @@ DEFAULT_SETTINGS = {
     "zratio_estimate_offset": 0.2,
     "ntot_plot_max": 10000,
     "heatmap_clip": 20000,
+    "raw_uncertainty": "percentile 10-90",
+    "growth_method": "weighted centroid",
+    "growth_min_size_nm": 6.5,
+    "growth_max_size_nm": 30.0,
+    "growth_threshold_fraction": 0.35,
+    "difference_peak_min_size_nm": 30.0,
     "smallest_size": 6.5,
     "inversion_methods": ["gunn woessner mod"],
     "tube_segments": "tubediameter,tubelength,aflow,angle\n0,1.93,qa,0\n0,2.80,8,0\n0,5.21,1.3,0",
@@ -83,6 +90,7 @@ shared_state = pn.state.cache.setdefault(
         "version": 0,
         "raw_fig": None,
         "inversion_fig": None,
+        "difference_fig": None,
         "latest_inversion": None,
         "status": "Status: idle",
     },
@@ -92,6 +100,7 @@ with shared_state["lock"]:
         shared_state["version"]
         if shared_state["raw_fig"] is None
         and shared_state["inversion_fig"] is None
+        and shared_state["difference_fig"] is None
         and shared_state["latest_inversion"] is None
         else -1
     )
@@ -140,6 +149,12 @@ def save_settings():
         "zratio_estimate_offset": float(zratio_estimate_offset.value),
         "ntot_plot_max": float(ntot_plot_max.value),
         "heatmap_clip": float(heatmap_clip.value),
+        "raw_uncertainty": raw_uncertainty.value,
+        "growth_method": growth_method.value,
+        "growth_min_size_nm": float(growth_min_size_nm.value),
+        "growth_max_size_nm": float(growth_max_size_nm.value),
+        "growth_threshold_fraction": float(growth_threshold_fraction.value),
+        "difference_peak_min_size_nm": float(difference_peak_min_size_nm.value),
         "smallest_size": float(smallest_size.value),
         "inversion_methods": selected_inversion_methods(),
         "tube_segments": tube_segments.value,
@@ -163,6 +178,46 @@ def _json_safe(value):
     return value
 
 
+def update_log_size_axis(fig, row, sizes):
+    sizes = np.asarray(sizes, dtype=float)
+    finite_sizes = sizes[np.isfinite(sizes)]
+    if len(finite_sizes) == 0:
+        fig.update_yaxes(type="log", title_text="dp (nm)", row=row, col=1)
+        return
+    y_min = max(float(smallest_size.value), np.nanmin(finite_sizes))
+    y_max = np.nanmax(finite_sizes)
+    if np.isfinite(y_min) and np.isfinite(y_max) and y_min > 0 and y_max > y_min:
+        fig.update_yaxes(
+            type="log",
+            range=[np.log10(y_min), np.log10(y_max)],
+            title_text="dp (nm)",
+            row=row,
+            col=1,
+        )
+    else:
+        fig.update_yaxes(type="log", title_text="dp (nm)", row=row, col=1)
+
+
+def update_log_size_x_axis(fig, row, sizes):
+    sizes = np.asarray(sizes, dtype=float)
+    finite_sizes = sizes[np.isfinite(sizes)]
+    if len(finite_sizes) == 0:
+        fig.update_xaxes(type="log", title_text="Dp (nm)", row=row, col=1)
+        return
+    x_min = max(float(smallest_size.value), np.nanmin(finite_sizes))
+    x_max = np.nanmax(finite_sizes)
+    if np.isfinite(x_min) and np.isfinite(x_max) and x_min > 0 and x_max > x_min:
+        fig.update_xaxes(
+            type="log",
+            range=[np.log10(x_min), np.log10(x_max)],
+            title_text="Dp (nm)",
+            row=row,
+            col=1,
+        )
+    else:
+        fig.update_xaxes(type="log", title_text="Dp (nm)", row=row, col=1)
+
+
 def app_path(value):
     path = Path(value).expanduser()
     if path.is_absolute():
@@ -183,6 +238,8 @@ def save_data(event=None):
         raw_plot.object.write_html(outdir / f"raw_plot_{stamp}.html")
     if inversion_plot.object is not None:
         inversion_plot.object.write_html(outdir / f"inversion_plot_{stamp}.html")
+    if difference_plot.object is not None:
+        difference_plot.object.write_html(outdir / f"difference_diagnostics_{stamp}.html")
     ntot_tables = []
     measured_ntot_saved = False
     for tr in latest_inversion:
@@ -522,16 +579,30 @@ def build_median_distributions(result):
         z = np.asarray(tr["Z"], dtype=float)
         if z.size == 0:
             continue
+        flow_rel_rmse = np.asarray(tr.get("flow_rel_rmse", []), dtype=float)
+        if len(flow_rel_rmse) != z.shape[1]:
+            flow_rel_rmse = np.full(z.shape[1], np.nan)
         if start is not None:
             times = pd.to_datetime(tr["x"])
             mask = (times >= start) & (times < end)
             if not np.any(mask):
                 continue
             z = z[:, mask]
+            flow_rel_rmse = flow_rel_rmse[mask]
+        stats = diag.nan_stats_by_row(z)
+        median_flow_rel_rmse = np.nanmedian(flow_rel_rmse)
+        if not np.isfinite(median_flow_rel_rmse):
+            median_flow_rel_rmse = 0.0
+        flow_error = stats["median"] * median_flow_rel_rmse
         medians.append({
             "label": f"{method_label(tr.get('method', 'gunn woessner mod'))} {tr['polarity']}",
             "dp": np.asarray(tr["y"], dtype=float),
-            "median": np.nanmedian(z, axis=1),
+            "median": stats["median"],
+            "p10": stats["p10"],
+            "p90": stats["p90"],
+            "flow_error": flow_error,
+            "flow_rel_rmse": median_flow_rel_rmse,
+            "n_scans": int(z.shape[1]),
         })
 
     if start is None:
@@ -554,10 +625,16 @@ def build_median_distributions(result):
             scan_sizes = [size_nm for size_nm in scan_sizes if len(size_nm) == channel_count]
             scan_concs = [conc for conc in scan_concs if len(conc) == channel_count]
             if scan_concs:
+                smear_stats = diag.nan_stats_by_row(np.vstack(scan_concs).T)
                 medians.append({
                     "label": "SMEAR III SMPS",
                     "dp": np.nanmedian(np.vstack(scan_sizes), axis=0),
-                    "median": np.nanmedian(np.vstack(scan_concs), axis=0),
+                    "median": smear_stats["median"],
+                    "p10": smear_stats["p10"],
+                    "p90": smear_stats["p90"],
+                    "flow_error": np.full(len(smear_stats["median"]), np.nan),
+                    "flow_rel_rmse": np.nan,
+                    "n_scans": int(len(scan_concs)),
                 })
 
     return medians
@@ -593,7 +670,15 @@ def match_to_smeariii_cpc(times, values, smear_cpc):
         direction="nearest",
         tolerance=pd.Timedelta(minutes=15),
     )
-    return matched.dropna(subset=["value", "SMEARIII_CPC"])
+    matched = matched.dropna(subset=["value", "SMEARIII_CPC"])
+    matched["ratio"] = np.divide(
+        matched["value"],
+        matched["SMEARIII_CPC"],
+        out=np.full(len(matched), np.nan),
+        where=matched["SMEARIII_CPC"].to_numpy(dtype=float) > 0,
+    )
+    matched["delta"] = matched["value"] - matched["SMEARIII_CPC"]
+    return matched
 
 
 def build_scan_smeariii_comparison_heatmaps(result):
@@ -856,6 +941,44 @@ heatmap_clip = pn.widgets.FloatInput(
     value=float(settings.get("heatmap_clip", 20000)),
     step=1000,
 )
+raw_uncertainty = pn.widgets.Select(
+    name="Raw uncertainty",
+    options=["percentile 10-90", "std", "sem", "min-max", "none"],
+    value=settings.get("raw_uncertainty", DEFAULT_SETTINGS["raw_uncertainty"]),
+    width=180,
+)
+growth_method = pn.widgets.Select(
+    name="Growth method",
+    options=["weighted centroid", "peak size"],
+    value=settings.get("growth_method", DEFAULT_SETTINGS["growth_method"]),
+    width=180,
+)
+growth_min_size_nm = pn.widgets.FloatInput(
+    name="Growth min dp (nm)",
+    value=float(settings.get("growth_min_size_nm", DEFAULT_SETTINGS["growth_min_size_nm"])),
+    step=0.5,
+)
+growth_max_size_nm = pn.widgets.FloatInput(
+    name="Growth max dp (nm)",
+    value=float(settings.get("growth_max_size_nm", DEFAULT_SETTINGS["growth_max_size_nm"])),
+    step=1.0,
+)
+growth_threshold_fraction = pn.widgets.FloatInput(
+    name="Growth threshold frac",
+    value=float(settings.get(
+        "growth_threshold_fraction",
+        DEFAULT_SETTINGS["growth_threshold_fraction"],
+    )),
+    step=0.05,
+)
+difference_peak_min_size_nm = pn.widgets.FloatInput(
+    name="Diff peak min dp (nm)",
+    value=float(settings.get(
+        "difference_peak_min_size_nm",
+        DEFAULT_SETTINGS["difference_peak_min_size_nm"],
+    )),
+    step=1.0,
+)
 
 tube_segments = pn.widgets.TextAreaInput(
     name="Tube segments: tubediameter,tubelength,aflow[,angle]",
@@ -881,12 +1004,14 @@ status = pn.pane.Markdown("Status: idle")
 
 raw_plot = pn.pane.Plotly(height=750, width=1300)
 inversion_plot = pn.pane.Plotly(width=1300)
+difference_plot = pn.pane.Plotly(width=1300)
 
 
 def publish_shared_state(
     *,
     raw_fig=None,
     inversion_fig=None,
+    difference_fig=None,
     inversion_result=None,
     status_text=None,
 ):
@@ -895,6 +1020,8 @@ def publish_shared_state(
             shared_state["raw_fig"] = raw_fig
         if inversion_fig is not None:
             shared_state["inversion_fig"] = inversion_fig
+        if difference_fig is not None:
+            shared_state["difference_fig"] = difference_fig
         if inversion_result is not None:
             shared_state["latest_inversion"] = inversion_result
         if status_text is not None:
@@ -911,6 +1038,7 @@ def sync_shared_state():
             return
         raw_fig = shared_state["raw_fig"]
         inversion_fig = shared_state["inversion_fig"]
+        difference_fig = shared_state["difference_fig"]
         inversion_result = shared_state["latest_inversion"]
         status_text = shared_state["status"]
 
@@ -918,6 +1046,8 @@ def sync_shared_state():
         raw_plot.object = copy.deepcopy(raw_fig)
     if inversion_fig is not None:
         inversion_plot.object = copy.deepcopy(inversion_fig)
+    if difference_fig is not None:
+        difference_plot.object = copy.deepcopy(difference_fig)
     if inversion_result is not None:
         latest_inversion = inversion_result
     if status_text is not None:
@@ -991,32 +1121,58 @@ def plot_selected_scans(event=None):
             abs_size_nm=("abs_size_nm", "mean"),
             mean=("cpc_float", "mean"),
             std=("cpc_float", "std"),
+            sem=("cpc_float", "sem"),
+            p10=("cpc_float", lambda x: x.quantile(0.10)),
+            p90=("cpc_float", lambda x: x.quantile(0.90)),
+            ymin=("cpc_float", "min"),
+            ymax=("cpc_float", "max"),
             count=("cpc_float", "size"),
         )
         .reset_index()
         .sort_values("abs_size_nm")
     )
-    size_summary["error"] = size_summary["std"].fillna(0)
+    mode = raw_uncertainty.value
+    if mode == "std":
+        size_summary["err_low"] = size_summary["std"].fillna(0)
+        size_summary["err_high"] = size_summary["std"].fillna(0)
+    elif mode == "sem":
+        size_summary["err_low"] = size_summary["sem"].fillna(0)
+        size_summary["err_high"] = size_summary["sem"].fillna(0)
+    elif mode == "min-max":
+        size_summary["err_low"] = (size_summary["mean"] - size_summary["ymin"]).clip(lower=0).fillna(0)
+        size_summary["err_high"] = (size_summary["ymax"] - size_summary["mean"]).clip(lower=0).fillna(0)
+    elif mode == "none":
+        size_summary["err_low"] = 0.0
+        size_summary["err_high"] = 0.0
+    else:
+        size_summary["err_low"] = (size_summary["mean"] - size_summary["p10"]).clip(lower=0).fillna(0)
+        size_summary["err_high"] = (size_summary["p90"] - size_summary["mean"]).clip(lower=0).fillna(0)
 
     for polarity, g in size_summary.groupby("polarity"):
+        error_y = None
+        if mode != "none":
+            error_y = dict(
+                type="data",
+                array=g["err_high"],
+                arrayminus=g["err_low"],
+                visible=True,
+                thickness=2.5,
+                width=8,
+            )
+
         fig.add_scatter(
             x=g["abs_size_nm"],
             y=g["mean"],
-            error_y=dict(
-                type="data",
-                array=g["error"],
-                visible=True,
-                thickness=1.5,
-                width=4,
-            ),
+            error_y=error_y,
             mode="lines+markers",
-            name=f"{polarity} mean +/- std",
-            customdata=np.column_stack((g["error"], g["count"])),
+            marker=dict(size=np.where(g["count"] > 1, 8, 11), symbol=np.where(g["count"] > 1, "circle", "circle-open")),
+            name=f"{polarity} mean ({mode})",
+            customdata=np.column_stack((g["err_low"], g["err_high"], g["count"])),
             hovertemplate=(
                 "dp=%{x:.2f} nm<br>"
                 "mean=%{y:.2f}<br>"
-                "std=%{customdata[0]:.2f}<br>"
-                "n=%{customdata[1]:.0f}<extra></extra>"
+                "err -%{customdata[0]:.2f} / +%{customdata[1]:.2f}<br>"
+                "n=%{customdata[2]:.0f}<extra></extra>"
             ),
             row=1,
             col=1,
@@ -1346,12 +1502,6 @@ def invert_one_scan(
 
     zp = 1e-4
     zn = zratio * zp
-    print(
-        f"invert_one_scan: method={inversion_method}, polarity={polarity}, "
-        f"charges={p.astype(int).tolist()}, "
-        f"Zn/Zp={zratio:.4g}, Zp={zp:.4g}, Zn={zn:.4g}",
-        flush=True,
-    )
 
     for i, dp_nm in enumerate(dp_meas_nm):
         voltage = voltage_from_size(
@@ -1419,6 +1569,7 @@ def run_inversion_calculation(df):
 
             heat_cols = []
             heat_times = []
+            heat_flow_rel_rmse = []
             ntot_vals = []
             ntot_measured = []
 
@@ -1431,6 +1582,7 @@ def run_inversion_calculation(df):
                 qa = float(qa_lpm.value) / 60000.0
                 qs = float(qs_lpm.value) / 60000.0
                 q_sheath_lpm = float(g_scan["sheath_setpoint"].median())
+                _, flow_rel_rmse = diag.sheath_flow_relative_rmse(g_scan[g_scan["Ntot"] == False])
                 qc = q_sheath_lpm / 60000.0
                 qm = qc + qa - qs
                 parsed_tube_segments = parse_tube_segments(
@@ -1489,6 +1641,7 @@ def run_inversion_calculation(df):
 
                 heat_cols.append(full_col)
                 heat_times.append(g_scan["time"].median())
+                heat_flow_rel_rmse.append(flow_rel_rmse)
                 ntot_limit = float(ntot_plot_max.value)
                 if np.isfinite(ntot_limit) and ntot_limit > 0 and ntot_scan > ntot_limit:
                     ntot_scan = np.nan
@@ -1503,6 +1656,7 @@ def run_inversion_calculation(df):
                     "Z": np.column_stack(heat_cols),
                     "x": heat_times,
                     "y": size_axis,
+                    "flow_rel_rmse": heat_flow_rel_rmse,
                 })
 
                 output.append({
@@ -1523,6 +1677,11 @@ def run_inversion_calculation(df):
         "scan_id": [x[4] for x in ion_points],
     })
 
+    output.append({
+        "kind": "scan_health",
+        "rows": diag.build_scan_health(df, group_key),
+    })
+
     return output
 
 
@@ -1532,6 +1691,23 @@ def plot_inversion_result(result):
     comparisons = build_scan_smeariii_comparison_heatmaps(result)
     comparison_keys = [key for key in heatmap_keys if key in comparisons]
     median_distributions = build_median_distributions(result)
+    growth_diagnostics = diag.build_growth_rate_diagnostics(
+        result,
+        growth_min_size_nm=float(growth_min_size_nm.value),
+        growth_max_size_nm=float(growth_max_size_nm.value),
+        growth_threshold_fraction=float(growth_threshold_fraction.value),
+        growth_method=growth_method.value,
+        method_label=method_label,
+    )
+    formation_diagnostics = diag.build_formation_rate_diagnostics(
+        result,
+        growth_min_size_nm=float(growth_min_size_nm.value),
+        growth_max_size_nm=float(growth_max_size_nm.value),
+        ntot_limit=float(ntot_plot_max.value),
+        method_label=method_label,
+    )
+    polarity_differences = diag.build_polarity_difference_heatmaps(result)
+    scan_health = next((tr.get("rows", []) for tr in result if tr.get("kind") == "scan_health"), [])
     result_t0, result_t1 = result_time_range(result)
     smear_cpc = pd.DataFrame(columns=["time", "SMEARIII_CPC"])
     if result_t0 is not None:
@@ -1545,11 +1721,25 @@ def plot_inversion_result(result):
         for method, polarity in heatmap_keys
     ]
     subplot_titles.extend(["Ntot", "Estimated Zn/Zp ratio"])
+    if growth_diagnostics:
+        rates = ", ".join(
+            f"{growth_diag['label']}: {growth_diag['growth_rate']:.2f} nm/h, R2={growth_diag['r2']:.2f}"
+            for growth_diag in growth_diagnostics
+        )
+        subplot_titles.append(f"NPF growth-rate diagnostic ({rates})")
+    if formation_diagnostics:
+        subplot_titles.append("NPF formation-rate / onset diagnostic")
+    if scan_health:
+        subplot_titles.append("Scan health")
     subplot_titles.extend([
         "Three-day median dN/dlog10Dp",
         "Our CPC Ntot vs SMEAR III CPC",
         "Inverted Ntot vs SMEAR III CPC",
     ])
+    subplot_titles.extend(
+        f"{method_label(diff['method'])} positive / negative inversion ratio"
+        for diff in polarity_differences
+    )
     subplot_titles.extend(
         f"{method_label(method)} {polarity} our / SMEAR III SMPS ratio"
         for method, polarity in comparison_keys
@@ -1557,12 +1747,16 @@ def plot_inversion_result(result):
 
     ntot_row = len(heatmap_keys) + 1
     ion_ratio_row = ntot_row + 1
-    median_row = ion_ratio_row + 1
+    growth_row = ion_ratio_row + 1 if growth_diagnostics else None
+    formation_row = ion_ratio_row + 1 + int(bool(growth_diagnostics)) if formation_diagnostics else None
+    scan_health_row = ion_ratio_row + 1 + int(bool(growth_diagnostics)) + int(bool(formation_diagnostics)) if scan_health else None
+    median_row = ion_ratio_row + 1 + int(bool(growth_diagnostics)) + int(bool(formation_diagnostics)) + int(bool(scan_health))
     cpc_scatter_row = median_row + 1
     inversion_scatter_row = cpc_scatter_row + 1
-    comparison_start_row = inversion_scatter_row + 1
+    polarity_difference_start_row = inversion_scatter_row + 1
+    comparison_start_row = polarity_difference_start_row + len(polarity_differences)
     rows = len(subplot_titles)
-    vertical_spacing = min(0.05, 0.8 / max(1, rows - 1))
+    vertical_spacing = min(0.008, 0.14 / max(1, rows - 1))
 
     fig = make_subplots(
         rows=rows,
@@ -1575,6 +1769,10 @@ def plot_inversion_result(result):
     heatmap_rows = {key: i + 1 for i, key in enumerate(heatmap_keys)}
     comparison_rows = {
         key: comparison_start_row + i for i, key in enumerate(comparison_keys)
+    }
+    polarity_difference_rows = {
+        diff["method"]: polarity_difference_start_row + i
+        for i, diff in enumerate(polarity_differences)
     }
     measured_ntot_added = False
     smear_cpc_added = False
@@ -1596,43 +1794,77 @@ def plot_inversion_result(result):
                 zmax=float(heatmap_clip.value),
                 name=f"{method_label(method)} {tr['polarity']} heatmap",
                 colorbar=dict(title="dN/dlog10Dp", len=0.35),
+                hovertemplate=(
+                    "time=%{x|%Y-%m-%d %H:%M}<br>"
+                    "dp=%{y:.2f} nm<br>"
+                    "dN/dlog10Dp=%{z:.2f}<extra></extra>"
+                ),
                 row=row,
                 col=1,
             )
 
-            fig.update_yaxes(type="log", title_text="dp (nm)", row=row, col=1)
+            update_log_size_axis(fig, row, tr["y"])
             fig.update_xaxes(title_text="Time", tickformat="%H:%M", row=row, col=1)
 
         elif tr["kind"] == "ntot":
             method = tr.get("method", "gunn woessner mod")
+            y_ntot = diag.guard_diagnostic_values(
+                tr["y"],
+                float(ntot_plot_max.value),
+                use_ntot_limit=True,
+                multiplier=8.0,
+            )
             fig.add_scatter(
                 x=tr["x"],
-                y=tr["y"],
+                y=y_ntot,
                 mode="lines+markers",
                 name=f"{method_label(method)} Ntot {tr['polarity']}",
+                hovertemplate=(
+                    f"inversion={method_label(method)} {tr['polarity']}<br>"
+                    "time=%{x|%Y-%m-%d %H:%M}<br>"
+                    "inverted Ntot=%{y:.2f}<extra></extra>"
+                ),
                 row=ntot_row,
                 col=1,
             )
 
             if "y_measured" in tr and tr["polarity"] == "positive" and not measured_ntot_added:
+                y_measured = diag.guard_diagnostic_values(
+                    tr["y_measured"],
+                    float(ntot_plot_max.value),
+                    use_ntot_limit=True,
+                    multiplier=8.0,
+                )
                 fig.add_scatter(
                     x=tr["x"],
-                    y=tr["y_measured"],
+                    y=y_measured,
                     mode="markers",
                     marker_symbol="x",
                     marker_size=10,
                     name=f"Measured Ntot",
+                    hovertemplate=(
+                        f"source=our CPC Ntot ({method_label(method)} {tr['polarity']} scan times)<br>"
+                        "time=%{x|%Y-%m-%d %H:%M}<br>"
+                        "our CPC Ntot=%{y:.2f}<extra></extra>"
+                    ),
                     row=ntot_row,
                     col=1,
                 )
                 measured_ntot_added = True
 
                 if not smear_cpc_added and not smear_cpc.empty:
+                    smear_y = diag.guard_diagnostic_values(
+                        smear_cpc["SMEARIII_CPC"],
+                        float(ntot_plot_max.value),
+                        use_ntot_limit=True,
+                        multiplier=8.0,
+                    )
                     fig.add_scatter(
                         x=smear_cpc["time"],
-                        y=smear_cpc["SMEARIII_CPC"],
+                        y=smear_y,
                         mode="lines+markers",
                         name="SMEAR III CPC",
+                        hovertemplate="time=%{x|%Y-%m-%d %H:%M}<br>SMEAR III CPC=%{y:.2f}<extra></extra>",
                         row=ntot_row,
                         col=1,
                     )
@@ -1640,6 +1872,7 @@ def plot_inversion_result(result):
 
                 if not cpc_scatter_added and "y_measured" in tr and tr["polarity"] == "positive":
                     matched = match_to_smeariii_cpc(tr["x"], tr["y_measured"], smear_cpc)
+                    matched = diag.filter_ntot_matches(matched, float(ntot_plot_max.value))
                     if not matched.empty:
                         scatter_max = max(
                             scatter_max,
@@ -1650,12 +1883,21 @@ def plot_inversion_result(result):
                             y=matched["SMEARIII_CPC"],
                             mode="markers",
                             name="Our CPC vs SMEAR III CPC",
+                            customdata=diag.plotly_customdata(matched["time"], matched["ratio"], matched["delta"]),
+                            hovertemplate=(
+                                "time=%{customdata[0]|%Y-%m-%d %H:%M}<br>"
+                                "our CPC=%{x:.2f}<br>"
+                                "SMEAR III CPC=%{y:.2f}<br>"
+                                "our/SMEAR=%{customdata[1]:.3f}<br>"
+                                "delta=%{customdata[2]:.2f}<extra></extra>"
+                            ),
                             row=cpc_scatter_row,
                             col=1,
                         )
                         cpc_scatter_added = True
 
             matched = match_to_smeariii_cpc(tr["x"], tr["y"], smear_cpc)
+            matched = diag.filter_ntot_matches(matched, float(ntot_plot_max.value))
             if not matched.empty:
                 inversion_scatter_max = max(
                     inversion_scatter_max,
@@ -1666,6 +1908,14 @@ def plot_inversion_result(result):
                     y=matched["SMEARIII_CPC"],
                     mode="markers",
                     name=f"{method_label(method)} {tr['polarity']} vs SMEAR III CPC",
+                    customdata=diag.plotly_customdata(matched["time"], matched["ratio"], matched["delta"]),
+                    hovertemplate=(
+                        "time=%{customdata[0]|%Y-%m-%d %H:%M}<br>"
+                        "inverted Ntot=%{x:.2f}<br>"
+                        "SMEAR III CPC=%{y:.2f}<br>"
+                        "inverted/SMEAR=%{customdata[1]:.3f}<br>"
+                        "delta=%{customdata[2]:.2f}<extra></extra>"
+                    ),
                     row=inversion_scatter_row,
                     col=1,
                 )
@@ -1699,12 +1949,142 @@ def plot_inversion_result(result):
                     col=1,
                 )
 
+    if growth_row is not None:
+        for growth_diag in growth_diagnostics:
+            fig.add_scatter(
+                x=growth_diag["time"],
+                y=growth_diag["dp"],
+                mode="markers",
+                name=f"{growth_diag['label']} event mode",
+                customdata=np.column_stack((
+                    np.full(len(growth_diag["dp"]), growth_diag["growth_rate"]),
+                    np.full(len(growth_diag["dp"]), growth_diag["r2"]),
+                    np.full(len(growth_diag["dp"]), growth_diag["n_points"]),
+                )),
+                hovertemplate=(
+                    "time=%{x|%Y-%m-%d %H:%M}<br>"
+                    "event mode dp=%{y:.2f} nm<br>"
+                    "GR=%{customdata[0]:.2f} nm/h<br>"
+                    "R2=%{customdata[1]:.3f}<br>"
+                    "fit points=%{customdata[2]:.0f}<extra></extra>"
+                ),
+                row=growth_row,
+                col=1,
+            )
+            fig.add_scatter(
+                x=growth_diag["time"],
+                y=growth_diag["fit"],
+                mode="lines",
+                name=f"{growth_diag['label']} GR {growth_diag['growth_rate']:.2f} nm/h",
+                hovertemplate="time=%{x|%Y-%m-%d %H:%M}<br>fit dp=%{y:.2f} nm<extra></extra>",
+                row=growth_row,
+                col=1,
+            )
+
+    if formation_row is not None:
+        for formation_diag in formation_diagnostics:
+            customdata = np.column_stack((
+                formation_diag["formation_rate"],
+                np.full(len(formation_diag["time"]), formation_diag["threshold"]),
+                np.full(len(formation_diag["time"]), formation_diag["spike_limit"]),
+            ))
+            fig.add_scatter(
+                x=formation_diag["time"],
+                y=formation_diag["concentration"],
+                mode="lines+markers",
+                name=f"{formation_diag['label']} {formation_diag['size_range']}",
+                customdata=customdata,
+                hovertemplate=(
+                    "time=%{x|%Y-%m-%d %H:%M}<br>"
+                    "N(%{fullData.name})=%{y:.2f}<br>"
+                    "dN/dt=%{customdata[0]:.2f} cm-3 h-1<br>"
+                    "onset threshold=%{customdata[1]:.2f}<br>"
+                    "spike guard=%{customdata[2]:.2f}<extra></extra>"
+                ),
+                row=formation_row,
+                col=1,
+            )
+            if pd.notna(formation_diag["onset_time"]):
+                onset_idx = int(np.nanargmin(np.abs(pd.to_datetime(formation_diag["time"]) - formation_diag["onset_time"])))
+                fig.add_scatter(
+                    x=[formation_diag["onset_time"]],
+                    y=[formation_diag["concentration"][onset_idx]],
+                    mode="markers",
+                    marker=dict(symbol="diamond", size=12),
+                    name=f"{formation_diag['label']} onset",
+                    hovertemplate="onset=%{x|%Y-%m-%d %H:%M}<br>N=%{y:.2f}<extra></extra>",
+                    row=formation_row,
+                    col=1,
+                )
+
+    if scan_health_row is not None:
+        health_df = pd.DataFrame(scan_health).sort_values("time")
+        fig.add_scatter(
+            x=health_df["time"],
+            y=100 * health_df["nan_fraction"],
+            mode="lines+markers",
+            name="CPC NaN fraction",
+            customdata=diag.plotly_customdata(
+                health_df["scan_id"],
+                health_df["flow_rmse"],
+                health_df["flow_rel_rmse"],
+                health_df["missing_polarity"],
+            ),
+            hovertemplate=(
+                "scan=%{customdata[0]}<br>"
+                "time=%{x|%Y-%m-%d %H:%M}<br>"
+                "CPC NaN=%{y:.1f}%<br>"
+                "flow RMSE=%{customdata[1]:.3f} L/min<br>"
+                "flow relative RMSE=%{customdata[2]:.3%}<br>"
+                "missing polarity=%{customdata[3]}<extra></extra>"
+            ),
+            row=scan_health_row,
+            col=1,
+        )
+        fig.add_scatter(
+            x=health_df["time"],
+            y=health_df["flow_rmse"],
+            mode="lines+markers",
+            name="Sheath flow RMSE",
+            hovertemplate="time=%{x|%Y-%m-%d %H:%M}<br>flow RMSE=%{y:.3f} L/min<extra></extra>",
+            row=scan_health_row,
+            col=1,
+        )
+
     for median in median_distributions:
+        customdata = np.column_stack((
+            median.get("p10", np.full(len(median["dp"]), np.nan)),
+            median.get("p90", np.full(len(median["dp"]), np.nan)),
+            np.full(len(median["dp"]), median.get("n_scans", np.nan)),
+            np.full(len(median["dp"]), median.get("flow_rel_rmse", np.nan)),
+            median.get("flow_error", np.full(len(median["dp"]), np.nan)),
+        ))
+        flow_error = np.asarray(median.get("flow_error", []), dtype=float)
+        error_y = None
+        if len(flow_error) == len(median["dp"]) and np.any(np.isfinite(flow_error) & (flow_error > 0)):
+            error_y = dict(
+                type="data",
+                array=flow_error,
+                visible=True,
+                thickness=1.5,
+                width=4,
+            )
         fig.add_scatter(
             x=median["dp"],
             y=median["median"],
             mode="lines+markers",
             name=f"Median {median['label']}",
+            error_y=error_y,
+            customdata=customdata,
+            hovertemplate=(
+                "dp=%{x:.2f} nm<br>"
+                "median=%{y:.2f}<br>"
+                "p10=%{customdata[0]:.2f}<br>"
+                "p90=%{customdata[1]:.2f}<br>"
+                "scans=%{customdata[2]:.0f}<br>"
+                "sheath rel RMSE=%{customdata[3]:.3%}<br>"
+                "flow error bar=+/- %{customdata[4]:.2f}<extra></extra>"
+            ),
             row=median_row,
             col=1,
         )
@@ -1735,12 +2115,51 @@ def plot_inversion_result(result):
     fig.update_xaxes(title_text="Time", tickformat="%H:%M", row=ntot_row, col=1)
     fig.update_yaxes(title_text="Zn/Zp", row=ion_ratio_row, col=1)
     fig.update_xaxes(title_text="Time", tickformat="%H:%M", row=ion_ratio_row, col=1)
-    fig.update_xaxes(type="log", title_text="Dp (nm)", row=median_row, col=1)
+    if growth_row is not None:
+        fig.update_yaxes(type="log", title_text="Event mode dp (nm)", row=growth_row, col=1)
+        fig.update_xaxes(title_text="Time", tickformat="%H:%M", row=growth_row, col=1)
+    if formation_row is not None:
+        fig.update_yaxes(title_text="N in event range", row=formation_row, col=1)
+        fig.update_xaxes(title_text="Time", tickformat="%H:%M", row=formation_row, col=1)
+    if scan_health_row is not None:
+        fig.update_yaxes(title_text="NaN % / flow RMSE", row=scan_health_row, col=1)
+        fig.update_xaxes(title_text="Time", tickformat="%H:%M", row=scan_health_row, col=1)
+    median_sizes = np.concatenate([
+        np.asarray(median["dp"], dtype=float)
+        for median in median_distributions
+    ]) if median_distributions else np.array([])
+    update_log_size_x_axis(fig, median_row, median_sizes)
     fig.update_yaxes(title_text="dN/dlog10Dp", row=median_row, col=1)
     fig.update_xaxes(title_text="Our CPC Ntot", row=cpc_scatter_row, col=1)
     fig.update_yaxes(title_text="SMEAR III CPC Ntot", row=cpc_scatter_row, col=1)
     fig.update_xaxes(title_text="Inverted Ntot", row=inversion_scatter_row, col=1)
     fig.update_yaxes(title_text="SMEAR III CPC Ntot", row=inversion_scatter_row, col=1)
+
+    for diff in polarity_differences:
+        row = polarity_difference_rows[diff["method"]]
+        fig.add_heatmap(
+            z=diff["z"],
+            x=diff["x"],
+            y=diff["y"],
+            zmin=0,
+            zmax=2,
+            colorscale=[
+                [0.0, "#2c7bb6"],
+                [0.5, "#ffffbf"],
+                [1.0, "#d7191c"],
+            ],
+            name=f"{method_label(diff['method'])} positive / negative",
+            colorbar=dict(title="+/-", len=0.25),
+            hovertemplate=(
+                "time=%{x|%Y-%m-%d %H:%M}<br>"
+                "dp=%{y:.2f} nm<br>"
+                "positive/negative=%{z:.3f}<extra></extra>"
+            ),
+            row=row,
+            col=1,
+        )
+        fig.update_xaxes(title_text="Time", tickformat="%H:%M", row=row, col=1)
+        update_log_size_axis(fig, row, diff["y"])
 
     for key, row in comparison_rows.items():
         method, polarity = key
@@ -1759,14 +2178,22 @@ def plot_inversion_result(result):
                 ],
                 name=f"{method_label(method)} {polarity} / SMEAR III",
                 colorbar=dict(title="ratio", len=0.25),
+                hovertemplate=(
+                    "time=%{x|%Y-%m-%d %H:%M}<br>"
+                    "dp=%{y:.2f} nm<br>"
+                    "our/SMEAR III=%{z:.3f}<extra></extra>"
+                ),
                 row=row,
                 col=1,
             )
         fig.update_xaxes(title_text="Time", tickformat="%H:%M", row=row, col=1)
-        fig.update_yaxes(type="log", title_text="dp (nm)", row=row, col=1)
+        if comparison is not None:
+            update_log_size_axis(fig, row, comparison["y"])
+        else:
+            fig.update_yaxes(type="log", title_text="dp (nm)", row=row, col=1)
 
     fig.update_layout(
-        height=max(1000, 420 * rows),
+        height=max(1200, 520 * rows),
         width=1300,
         title="Offline inversion result",
         showlegend=True,
@@ -1775,6 +2202,138 @@ def plot_inversion_result(result):
     )
 
     inversion_plot.object = fig
+    return fig
+
+
+def plot_difference_diagnostics(result):
+    t0, t1 = result_time_range(result)
+    if t1 is None:
+        difference_plot.object = None
+        return None
+
+    smear = load_smeariii_sum_range(t1 - pd.Timedelta(hours=3, minutes=30), t1 + pd.Timedelta(minutes=15))
+    diagnostics = diag.build_last_hours_smear_difference(
+        result,
+        smear,
+        min_size_nm=float(smallest_size.value),
+        peak_min_size_nm=float(difference_peak_min_size_nm.value),
+        ntot_limit=float(ntot_plot_max.value),
+        hours=3,
+    )
+    fig = make_subplots(
+        rows=4,
+        cols=1,
+        vertical_spacing=0.06,
+        subplot_titles=[
+            "Last 3 h median our / SMEAR III distribution ratio",
+            "Integrated concentration match",
+            f"Peak diameter shift over time (dp >= {float(difference_peak_min_size_nm.value):.1f} nm)",
+            "Last 3 h median peak shape compared with SMEAR III",
+        ],
+    )
+
+    for item in diagnostics["ratios"]:
+        label = f"{method_label(item['method'])} {item['polarity']}"
+        fig.add_scatter(
+            x=item["size_nm"],
+            y=item["ratio_median"],
+            mode="lines+markers",
+            name=f"{label} ratio",
+            hovertemplate="dp=%{x:.2f} nm<br>median ratio=%{y:.3f}<extra></extra>",
+            row=1,
+            col=1,
+        )
+
+    smear_shape_added = False
+    for item in diagnostics.get("shapes", []):
+        label = f"{method_label(item['method'])} {item['polarity']}"
+        fig.add_scatter(
+            x=item["size_nm"],
+            y=item["our_median"],
+            mode="lines+markers",
+            name=f"{label} shape",
+            hovertemplate="dp=%{x:.2f} nm<br>our median=%{y:.2f}<extra></extra>",
+            row=4,
+            col=1,
+        )
+        if not smear_shape_added:
+            fig.add_scatter(
+                x=item["size_nm"],
+                y=item["smear_median"],
+                mode="lines+markers",
+                line=dict(color="black", dash="dash"),
+                name="SMEAR III shape",
+                hovertemplate="dp=%{x:.2f} nm<br>SMEAR median=%{y:.2f}<extra></extra>",
+                row=4,
+                col=1,
+            )
+            smear_shape_added = True
+
+    matches = diagnostics["matches"]
+    if not matches.empty:
+        for (method, polarity), g in matches.groupby(["method", "polarity"]):
+            label = f"{method_label(method)} {polarity}"
+            fig.add_scatter(
+                x=g["smear_ntot"],
+                y=g["our_ntot"],
+                mode="markers",
+                name=f"{label} N",
+                customdata=diag.plotly_customdata(g["time"], g["ntot_ratio"], g["time_delta_min"]),
+                hovertemplate=(
+                    "time=%{customdata[0]|%Y-%m-%d %H:%M}<br>"
+                    "SMEAR N=%{x:.2f}<br>our N=%{y:.2f}<br>"
+                    "our/SMEAR=%{customdata[1]:.3f}<br>"
+                    "time offset=%{customdata[2]:.1f} min<extra></extra>"
+                ),
+                row=2,
+                col=1,
+            )
+            fig.add_scatter(
+                x=g["time"],
+                y=g["peak_shift_pct"],
+                mode="lines+markers",
+                name=f"{label} peak shift",
+                customdata=diag.plotly_customdata(g["our_peak_nm"], g["smear_peak_nm"]),
+                hovertemplate=(
+                    "time=%{x|%Y-%m-%d %H:%M}<br>"
+                    "peak shift=%{y:.1f}%<br>"
+                    f"peak min dp={float(difference_peak_min_size_nm.value):.1f} nm<br>"
+                    "our peak=%{customdata[0]:.2f} nm<br>"
+                    "SMEAR peak=%{customdata[1]:.2f} nm<extra></extra>"
+                ),
+                row=3,
+                col=1,
+            )
+
+        scatter_max = float(matches[["our_ntot", "smear_ntot"]].max().max())
+        if np.isfinite(scatter_max) and scatter_max > 0:
+            fig.add_scatter(
+                x=[0, scatter_max],
+                y=[0, scatter_max],
+                mode="lines",
+                line=dict(color="black", dash="dash"),
+                name="1:1",
+                row=2,
+                col=1,
+            )
+
+    fig.update_xaxes(type="log", title_text="Dp (nm)", row=1, col=1)
+    fig.update_yaxes(title_text="our / SMEAR", row=1, col=1)
+    fig.update_xaxes(title_text="SMEAR integrated N", row=2, col=1)
+    fig.update_yaxes(title_text="our integrated N", row=2, col=1)
+    fig.update_xaxes(title_text="Time", tickformat="%H:%M", row=3, col=1)
+    fig.update_yaxes(title_text="peak shift %", row=3, col=1)
+    fig.update_xaxes(type="log", title_text="Dp (nm)", row=4, col=1)
+    fig.update_yaxes(title_text="dN/dlog10Dp", row=4, col=1)
+    fig.update_layout(
+        height=1800,
+        width=1300,
+        title="Last 3 h DMPS vs SMEAR III difference diagnostics",
+        showlegend=True,
+        margin=dict(l=50, r=260, t=70, b=40),
+        legend=dict(x=1.02, y=1.0),
+    )
+    difference_plot.object = fig
     return fig
 
 
@@ -1806,6 +2365,7 @@ def run_inversion(event=None):
                 global auto_pending_signature
 
                 fig = plot_inversion_result(result)
+                diff_fig = plot_difference_diagnostics(result)
 
                 if auto_checkbox.value:
                     save_data()
@@ -1819,6 +2379,7 @@ def run_inversion(event=None):
                 status.object = status_text
                 publish_shared_state(
                     inversion_fig=fig,
+                    difference_fig=diff_fig,
                     inversion_result=result,
                     status_text=status_text,
                 )
@@ -1909,10 +2470,12 @@ def run_auto_worker():
 
                 latest_inversion = result
                 fig = plot_inversion_result(result)
+                diff_fig = plot_difference_diagnostics(result)
                 save_data()
                 save_auto_state({"last_saved_signature": signature})
                 publish_shared_state(
                     inversion_fig=fig,
+                    difference_fig=diff_fig,
                     inversion_result=result,
                     status_text=str(status.object),
                 )
@@ -1952,6 +2515,12 @@ for w in [
     zratio_estimate_offset,
     ntot_plot_max,
     heatmap_clip,
+    raw_uncertainty,
+    growth_method,
+    growth_min_size_nm,
+    growth_max_size_nm,
+    growth_threshold_fraction,
+    difference_peak_min_size_nm,
     smallest_size,
     tube_segments,
     inversion_methods,
@@ -1969,6 +2538,7 @@ controls = pn.Column(
     pn.Row(qa_lpm, qs_lpm, temp_K, press_Pa),
     pn.Row(zratio_widget, zratio_min_widget, zratio_max_widget, zratio_smoothing_step, zratio_min_size_nm, zratio_estimate_offset, use_zratio_checkbox),
     pn.Row(ntot_plot_max, heatmap_clip, smallest_size),
+    pn.Row(raw_uncertainty, growth_method, growth_min_size_nm, growth_max_size_nm, growth_threshold_fraction, difference_peak_min_size_nm),
     tube_segments,
     inversion_methods,
     pn.Row(plot_button, invert_button, save_button, status),
@@ -1977,6 +2547,7 @@ controls = pn.Column(
 plot_tabs = pn.Tabs(
     ("Raw Data", pn.Column(raw_plot)),
     ("Inversion", pn.Column(inversion_plot)),
+    ("Difference Diagnostics", pn.Column(difference_plot)),
     dynamic=True,
 )
 

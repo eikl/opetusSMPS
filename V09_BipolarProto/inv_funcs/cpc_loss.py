@@ -92,6 +92,8 @@ def cpc_loss1(dp, temp, press, cpc_type=3010):
     
     elif cpc_type == "HY09":
         res = cpc_loss_curve(dp)
+        if dp > 20e-9:
+            res = 1.0
     
     return res
 
