@@ -38,6 +38,11 @@ DEFAULT_SETTINGS = {
     "scan_root": "logs/scans",
     "save_root": "~/OneDrive/DMPS_inversions",
     "n_scans_plot": 200,
+    "scan_selection_mode": "Newest N",
+    "scan_start_date": None,
+    "scan_start_time": "00:00",
+    "scan_end_date": None,
+    "scan_end_time": "23:59",
     "auto_interval_min": 30,
     "auto_file_age_sec": 120,
     "daily_overwrite": True,
@@ -80,8 +85,10 @@ inversion_executor = ThreadPoolExecutor(max_workers=1)
 inversion_lock = threading.Lock()
 inversion_running = False
 latest_inversion = None
+latest_difference_diagnostics = None
 auto_pending_signature = None
 AUTO_STATE_FILE = APP_ROOT / "auto_inversion_state.json"
+scan_time_cache = {}
 SHARED_STATE_KEY = "offline_inversion_viewer_shared_state"
 shared_state = pn.state.cache.setdefault(
     SHARED_STATE_KEY,
@@ -91,6 +98,7 @@ shared_state = pn.state.cache.setdefault(
         "raw_fig": None,
         "inversion_fig": None,
         "difference_fig": None,
+        "difference_diagnostics": None,
         "latest_inversion": None,
         "status": "Status: idle",
     },
@@ -131,6 +139,11 @@ def save_settings():
         "scan_root": scan_root.value,
         "save_root": save_root.value,
         "n_scans_plot": int(n_scans_plot.value),
+        "scan_selection_mode": scan_selection_mode.value,
+        "scan_start_date": as_date(scan_start_date.value).isoformat() if as_date(scan_start_date.value) else None,
+        "scan_start_time": scan_start_time.value,
+        "scan_end_date": as_date(scan_end_date.value).isoformat() if as_date(scan_end_date.value) else None,
+        "scan_end_time": scan_end_time.value,
         "auto_interval_min": int(auto_interval_min.value),
         "auto_file_age_sec": int(auto_file_age_sec.value),
         "daily_overwrite": bool(daily_overwrite_checkbox.value),
@@ -224,6 +237,34 @@ def app_path(value):
         return path
     return APP_ROOT / path
 
+
+def parse_saved_date(value):
+    if not value:
+        return None
+    try:
+        return date.fromisoformat(str(value))
+    except ValueError:
+        return None
+
+
+def parse_time_text(value, fallback):
+    text = str(value or "").strip()
+    for fmt in ("%H:%M", "%H:%M:%S"):
+        try:
+            return pd.to_datetime(text, format=fmt).time()
+        except Exception:
+            pass
+    return pd.to_datetime(fallback, format="%H:%M").time()
+
+
+def as_date(value):
+    if not value:
+        return None
+    parsed = pd.to_datetime(value, errors="coerce")
+    if pd.isna(parsed):
+        return None
+    return parsed.date()
+
 def save_data(event=None):
     if latest_inversion is None:
         status.object = "No inversion data to save yet."
@@ -307,7 +348,42 @@ def save_data(event=None):
             print(f"Could not save SMEAR III CPC: {e}", flush=True)
         ntot_df = ntot_df.set_index("time")
         ntot_df.to_csv(outdir / f"ntot_{stamp}.csv")
+    if latest_difference_diagnostics is not None:
+        save_difference_diagnostics_data(outdir, stamp, latest_difference_diagnostics)
     status.object = f"Saved plots and data to `{outdir}`."
+
+
+def save_difference_diagnostics_data(outdir, stamp, diagnostics):
+    matches = diagnostics.get("matches")
+    if matches is not None and not matches.empty:
+        matches.to_csv(outdir / f"difference_matches_{stamp}.csv", index=False)
+
+    ratio_rows = []
+    for item in diagnostics.get("ratios", []):
+        for size_nm, ratio in zip(item["size_nm"], item["ratio_median"]):
+            ratio_rows.append({
+                "method": item["method"],
+                "polarity": item["polarity"],
+                "size_nm": size_nm,
+                "our_smear_ratio_median": ratio,
+                "n_matches": item["n_matches"],
+            })
+    if ratio_rows:
+        pd.DataFrame(ratio_rows).to_csv(outdir / f"difference_ratio_curves_{stamp}.csv", index=False)
+
+    shape_rows = []
+    for item in diagnostics.get("shapes", []):
+        for size_nm, our, smear in zip(item["size_nm"], item["our_median"], item["smear_median"]):
+            shape_rows.append({
+                "method": item["method"],
+                "polarity": item["polarity"],
+                "size_nm": size_nm,
+                "our_median": our,
+                "smear_median": smear,
+                "n_matches": item["n_matches"],
+            })
+    if shape_rows:
+        pd.DataFrame(shape_rows).to_csv(outdir / f"difference_shape_curves_{stamp}.csv", index=False)
 
 def cunningham_correction(dp, T=293.15, P=101325, a=1.142, b=0.558, c=0.999):
     lambda_0 = 67.3e-9
@@ -766,6 +842,77 @@ def list_scan_files(min_age_sec=0):
     return sorted(files, key=lambda p: (p.parent.name, p.stem))
 
 
+def scan_date_bounds():
+    start = as_date(scan_start_date.value)
+    end = as_date(scan_end_date.value)
+    start_ts = None
+    end_ts = None
+    if start:
+        start_time = parse_time_text(scan_start_time.value, DEFAULT_SETTINGS["scan_start_time"])
+        start_ts = pd.Timestamp.combine(start, start_time)
+    if end:
+        end_time = parse_time_text(scan_end_time.value, DEFAULT_SETTINGS["scan_end_time"])
+        end_ts = pd.Timestamp.combine(end, end_time)
+    return start_ts, end_ts
+
+
+def scan_file_time_range(path):
+    path = Path(path)
+    try:
+        stat = path.stat()
+    except FileNotFoundError:
+        return pd.NaT, pd.NaT
+
+    key = (str(path), stat.st_mtime_ns, stat.st_size)
+    cached = scan_time_cache.get(key)
+    if cached is not None:
+        return cached
+
+    try:
+        times = pd.read_csv(path, usecols=["time"])
+        parsed = pd.to_datetime(times["time"], errors="coerce").dropna()
+        if parsed.empty:
+            value = (pd.NaT, pd.NaT)
+        else:
+            value = (parsed.min(), parsed.max())
+    except Exception:
+        value = (pd.NaT, pd.NaT)
+
+    if len(scan_time_cache) > 2000:
+        scan_time_cache.clear()
+    scan_time_cache[key] = value
+    return value
+
+
+def filter_scan_files_by_date(files):
+    start_ts, end_ts = scan_date_bounds()
+    if start_ts is None and end_ts is None:
+        return files
+
+    selected = []
+    for path in files:
+        t0, t1 = scan_file_time_range(path)
+        if pd.isna(t0) or pd.isna(t1):
+            continue
+        if start_ts is not None and t1 < start_ts:
+            continue
+        if end_ts is not None and t0 > end_ts:
+            continue
+        selected.append(path)
+    return selected
+
+
+def files_for_selection(min_age_sec=0):
+    files = list_scan_files(min_age_sec=min_age_sec)
+    mode = scan_selection_mode.value
+    if mode in {"Date range", "Date range + newest N"}:
+        files = filter_scan_files_by_date(files)
+    if mode in {"Newest N", "Date range + newest N"}:
+        n = max(1, int(n_scans_plot.value))
+        files = files[-n:]
+    return files
+
+
 def load_auto_state():
     if not AUTO_STATE_FILE.exists():
         return {"last_saved_signature": None}
@@ -840,6 +987,34 @@ n_scans_plot = pn.widgets.IntInput(
     value=int(settings.get("n_scans_plot", DEFAULT_SETTINGS["n_scans_plot"])),
     step=1,
     width=160,
+)
+scan_selection_mode = pn.widgets.Select(
+    name="Scan selection",
+    options=["Newest N", "Date range", "Date range + newest N"],
+    value=settings.get("scan_selection_mode", DEFAULT_SETTINGS["scan_selection_mode"]),
+    width=190,
+)
+scan_start_date = pn.widgets.DatePicker(
+    name="Start date",
+    value=parse_saved_date(settings.get("scan_start_date", DEFAULT_SETTINGS["scan_start_date"])),
+    width=150,
+)
+scan_start_time = pn.widgets.TextInput(
+    name="Start time",
+    value=str(settings.get("scan_start_time", DEFAULT_SETTINGS["scan_start_time"])),
+    width=100,
+    placeholder="HH:MM",
+)
+scan_end_date = pn.widgets.DatePicker(
+    name="End date",
+    value=parse_saved_date(settings.get("scan_end_date", DEFAULT_SETTINGS["scan_end_date"])),
+    width=150,
+)
+scan_end_time = pn.widgets.TextInput(
+    name="End time",
+    value=str(settings.get("scan_end_time", DEFAULT_SETTINGS["scan_end_time"])),
+    width=100,
+    placeholder="HH:MM",
 )
 
 auto_interval_min = pn.widgets.IntInput(
@@ -1012,6 +1187,7 @@ def publish_shared_state(
     raw_fig=None,
     inversion_fig=None,
     difference_fig=None,
+    difference_diagnostics=None,
     inversion_result=None,
     status_text=None,
 ):
@@ -1022,6 +1198,8 @@ def publish_shared_state(
             shared_state["inversion_fig"] = inversion_fig
         if difference_fig is not None:
             shared_state["difference_fig"] = difference_fig
+        if difference_diagnostics is not None:
+            shared_state["difference_diagnostics"] = difference_diagnostics
         if inversion_result is not None:
             shared_state["latest_inversion"] = inversion_result
         if status_text is not None:
@@ -1030,7 +1208,7 @@ def publish_shared_state(
 
 
 def sync_shared_state():
-    global latest_inversion, local_shared_version
+    global latest_inversion, latest_difference_diagnostics, local_shared_version
 
     with shared_state["lock"]:
         version = shared_state["version"]
@@ -1039,6 +1217,7 @@ def sync_shared_state():
         raw_fig = shared_state["raw_fig"]
         inversion_fig = shared_state["inversion_fig"]
         difference_fig = shared_state["difference_fig"]
+        difference_diagnostics = shared_state["difference_diagnostics"]
         inversion_result = shared_state["latest_inversion"]
         status_text = shared_state["status"]
 
@@ -1048,6 +1227,8 @@ def sync_shared_state():
         inversion_plot.object = copy.deepcopy(inversion_fig)
     if difference_fig is not None:
         difference_plot.object = copy.deepcopy(difference_fig)
+    if difference_diagnostics is not None:
+        latest_difference_diagnostics = difference_diagnostics
     if inversion_result is not None:
         latest_inversion = inversion_result
     if status_text is not None:
@@ -1062,31 +1243,39 @@ def sync_shared_state():
 
 def refresh_scan_files(event=None):
     root = app_path(scan_root.value)
-    files = list_scan_files()
+    all_files = list_scan_files()
+    files = files_for_selection()
 
     print("cwd:", Path.cwd(), flush=True)
     print("scan root:", root.resolve(), flush=True)
-    print("found files:", len(files), flush=True)
+    print("found files:", len(all_files), flush=True)
 
-    scan_files.options = [str(p) for p in files]
+    scan_files.options = [str(p) for p in all_files]
 
-    if files and not scan_files.value:
-        n = max(1, int(n_scans_plot.value))
-        scan_files.value = [str(p) for p in files[-n:]]
+    if files:
+        scan_files.value = [str(p) for p in files]
+    else:
+        scan_files.value = []
 
-    status.object = f"Found **{len(files)}** scan CSV files."
+    status.object = f"Found **{len(all_files)}** scan CSV files; selected **{len(files)}** by `{scan_selection_mode.value}`."
 
 
 def select_last_n(event=None):
-    files = list_scan_files()
-    n = max(1, int(n_scans_plot.value))
-    scan_files.options = [str(p) for p in files]
-    scan_files.value = [str(p) for p in files[-n:]]
-    status.object = f"Selected last **{len(scan_files.value)}** scan files."
+    all_files = list_scan_files()
+    files = files_for_selection()
+    scan_files.options = [str(p) for p in all_files]
+    scan_files.value = [str(p) for p in files]
+    status.object = f"Selected **{len(scan_files.value)}** scan files by `{scan_selection_mode.value}`."
+
+
+def apply_scan_selection(event=None):
+    select_last_n()
 
 
 refresh_button.on_click(refresh_scan_files)
 select_last_button.on_click(select_last_n)
+for w in [scan_selection_mode, scan_start_date, scan_start_time, scan_end_date, scan_end_time, n_scans_plot]:
+    w.param.watch(apply_scan_selection, "value")
 
 
 # ---------------------------------------------------------------------
@@ -2206,9 +2395,12 @@ def plot_inversion_result(result):
 
 
 def plot_difference_diagnostics(result):
+    global latest_difference_diagnostics
+
     t0, t1 = result_time_range(result)
     if t1 is None:
         difference_plot.object = None
+        latest_difference_diagnostics = None
         return None
 
     smear = load_smeariii_sum_range(t1 - pd.Timedelta(hours=3, minutes=30), t1 + pd.Timedelta(minutes=15))
@@ -2220,6 +2412,7 @@ def plot_difference_diagnostics(result):
         ntot_limit=float(ntot_plot_max.value),
         hours=3,
     )
+    latest_difference_diagnostics = diagnostics
     fig = make_subplots(
         rows=4,
         cols=1,
@@ -2380,6 +2573,7 @@ def run_inversion(event=None):
                 publish_shared_state(
                     inversion_fig=fig,
                     difference_fig=diff_fig,
+                    difference_diagnostics=latest_difference_diagnostics,
                     inversion_result=result,
                     status_text=status_text,
                 )
@@ -2428,16 +2622,15 @@ def auto_refresh_invert_save():
 
 def prepare_auto_selection():
     min_age = max(0, int(auto_file_age_sec.value))
-    files = list_scan_files(min_age_sec=min_age)
+    files = files_for_selection(min_age_sec=min_age)
 
-    scan_files.options = [str(p) for p in files]
+    scan_files.options = [str(p) for p in list_scan_files(min_age_sec=min_age)]
 
     if not files:
         status.object = "Auto-run: no completed scan files found."
         return
 
-    n = max(1, int(n_scans_plot.value))
-    scan_files.value = [str(p) for p in files[-n:]]
+    scan_files.value = [str(p) for p in files]
 
     signature = selected_files_signature()
     state = load_auto_state()
@@ -2476,6 +2669,7 @@ def run_auto_worker():
                 publish_shared_state(
                     inversion_fig=fig,
                     difference_fig=diff_fig,
+                    difference_diagnostics=latest_difference_diagnostics,
                     inversion_result=result,
                     status_text=str(status.object),
                 )
@@ -2497,6 +2691,11 @@ for w in [
     scan_root,
     save_root,
     n_scans_plot,
+    scan_selection_mode,
+    scan_start_date,
+    scan_start_time,
+    scan_end_date,
+    scan_end_time,
     auto_interval_min,
     auto_file_age_sec,
     daily_overwrite_checkbox,
@@ -2530,6 +2729,7 @@ for w in [
 
 controls = pn.Column(
     pn.Row(scan_root, refresh_button, select_last_button, n_scans_plot),
+    pn.Row(scan_selection_mode, scan_start_date, scan_start_time, scan_end_date, scan_end_time),
     pn.Row(save_root),
     pn.Row(auto_checkbox, daily_overwrite_checkbox, auto_interval_min, auto_file_age_sec),
     pn.Accordion(("Selected scan CSVs", scan_files), active=[]),
