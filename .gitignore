@@ -3,7 +3,14 @@ V09_BipolarProto/settings_inversion.json
 V09_BipolarProto/saved_inversions/
 V09_BipolarProto/SMEARIII/
 
-V091_BipolarProto/logs/
-V091_BipolarProto/settings_inversion.json
-V091_BipolarProto/saved_inversions/
-V091_BipolarProto/SMEARIII/
+V091_BipolarSMPSProto/logs/
+V091_BipolarSMPSProto/settings_inversion.json
+V091_BipolarSMPSProto/saved_inversions/
+V091_BipolarSMPSProto/SMEARIII/
+
+
+V09_BipolarProto (Copy)/logs/
+V09_BipolarProto (Copy)/settings_inversion.json
+V09_BipolarProto (Copy)/saved_inversions/
+V09_BipolarProto (Copy)/SMEARIII/
+

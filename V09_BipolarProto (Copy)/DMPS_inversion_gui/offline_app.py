@@ -68,12 +68,6 @@ DEFAULT_SETTINGS = {
     "growth_threshold_fraction": 0.35,
     "difference_peak_min_size_nm": 30.0,
     "smallest_size": 6.5,
-    "scan_inversion_type": "DMPS",
-    "smps_settling_time_sec": 30.0,
-    "smps_timing_offset_min_sec": -300.0,
-    "smps_timing_offset_max_sec": 300.0,
-    "smps_timing_offset_step_sec": 10.0,
-    "smps_timing_match_tolerance_min": 15.0,
     "inversion_methods": ["gunn woessner mod"],
     "tube_segments": "tubediameter,tubelength,aflow,angle\n0,1.93,qa,0\n0,2.80,8,0\n0,5.21,1.3,0",
 }
@@ -175,12 +169,6 @@ def save_settings():
         "growth_threshold_fraction": float(growth_threshold_fraction.value),
         "difference_peak_min_size_nm": float(difference_peak_min_size_nm.value),
         "smallest_size": float(smallest_size.value),
-        "scan_inversion_type": scan_inversion_type.value,
-        "smps_settling_time_sec": float(smps_settling_time_sec.value),
-        "smps_timing_offset_min_sec": float(smps_timing_offset_min_sec.value),
-        "smps_timing_offset_max_sec": float(smps_timing_offset_max_sec.value),
-        "smps_timing_offset_step_sec": float(smps_timing_offset_step_sec.value),
-        "smps_timing_match_tolerance_min": float(smps_timing_match_tolerance_min.value),
         "inversion_methods": selected_inversion_methods(),
         "tube_segments": tube_segments.value,
     }
@@ -293,8 +281,6 @@ def save_data(event=None):
         inversion_plot.object.write_html(outdir / f"inversion_plot_{stamp}.html")
     if difference_plot.object is not None:
         difference_plot.object.write_html(outdir / f"difference_diagnostics_{stamp}.html")
-    if smps_timing_plot.object is not None:
-        smps_timing_plot.object.write_html(outdir / f"smps_timing_diagnostics_{stamp}.html")
     ntot_tables = []
     measured_ntot_saved = False
     for tr in latest_inversion:
@@ -429,56 +415,9 @@ def get_dma():
     )
 
 
-def inversion_size_column(df):
-    if "inversion_size_nm" in df.columns:
-        return "inversion_size_nm"
-    return "size_nm"
-
-
 def get_scan_size_axis(df):
-    size_col = inversion_size_column(df)
-    sizes = sorted(pd.to_numeric(df[size_col], errors="coerce").abs().dropna().unique())
+    sizes = sorted(pd.to_numeric(df["size_nm"], errors="coerce").abs().dropna().unique())
     return np.asarray(sizes, dtype=float)
-
-
-def apply_smps_size_shift(df):
-    df = df.copy()
-    df["inversion_size_nm"] = pd.to_numeric(df["size_nm"], errors="coerce")
-
-    if scan_inversion_type.value != "SMPS":
-        return df
-
-    delay = float(smps_settling_time_sec.value)
-    if not np.isfinite(delay) or delay <= 0:
-        return df
-
-    df["time"] = pd.to_datetime(df["time"], errors="coerce")
-    df["smps_source_time"] = df["time"] - pd.to_timedelta(delay, unit="s")
-    shifted_parts = []
-    group_cols = [col for col in ["scan_id", "scan_number", "scan_range", "polarity"] if col in df.columns]
-
-    for _, group in df.groupby(group_cols, dropna=False) if group_cols else [(None, df)]:
-        group = group.sort_values("time").copy()
-        timeline = group[["time", "size_nm"]].dropna(subset=["time"]).copy()
-        samples = group.reset_index().sort_values("smps_source_time")
-        samples["inversion_size_nm"] = np.nan
-
-        valid_samples = samples["smps_source_time"].notna()
-        if not timeline.empty and valid_samples.any():
-            matched = pd.merge_asof(
-                samples[valid_samples],
-                timeline.rename(columns={"time": "smps_source_time", "size_nm": "shifted_size_nm"}).sort_values("smps_source_time"),
-                on="smps_source_time",
-                direction="backward",
-            )
-            samples.loc[valid_samples, "inversion_size_nm"] = matched["shifted_size_nm"].to_numpy()
-
-        shifted_parts.append(samples.set_index("index"))
-
-    if shifted_parts:
-        df = pd.concat(shifted_parts).sort_index()
-
-    return df.drop(columns=["smps_source_time"], errors="ignore")
 
 
 def normalize_inversion_methods(values):
@@ -1110,7 +1049,6 @@ refresh_button = pn.widgets.Button(name="Refresh scan list", button_type="primar
 select_last_button = pn.widgets.Button(name="Select last N", button_type="primary")
 plot_button = pn.widgets.Button(name="Plot raw selected scans", button_type="success")
 invert_button = pn.widgets.Button(name="Run inversion", button_type="danger")
-smps_timing_button = pn.widgets.Button(name="Update SMPS timing plot", button_type="primary")
 
 dma_L = pn.widgets.FloatInput(name="DMA L (m)", value=float(settings.get("dma_L", 0.28)), step=0.01)
 dma_r1 = pn.widgets.FloatInput(name="DMA r1 (m)", value=float(settings.get("dma_r1", 0.025)), step=0.001)
@@ -1167,61 +1105,6 @@ smallest_size = pn.widgets.FloatInput(
     name="Smallest size (nm)",
     value=float(settings.get("smallest_size", DEFAULT_SETTINGS["smallest_size"])),
     step=0.1,
-)
-scan_inversion_type = pn.widgets.Select(
-    name="Scan inversion type",
-    options=["DMPS", "SMPS"],
-    value=(
-        settings.get("scan_inversion_type", DEFAULT_SETTINGS["scan_inversion_type"])
-        if settings.get("scan_inversion_type", DEFAULT_SETTINGS["scan_inversion_type"]) in ["DMPS", "SMPS"]
-        else DEFAULT_SETTINGS["scan_inversion_type"]
-    ),
-    width=140,
-)
-smps_settling_time_sec = pn.widgets.FloatInput(
-    name="SMPS system settling (s)",
-    value=float(settings.get(
-        "smps_settling_time_sec",
-        DEFAULT_SETTINGS["smps_settling_time_sec"],
-    )),
-    step=1.0,
-    width=180,
-)
-smps_timing_offset_min_sec = pn.widgets.FloatInput(
-    name="Timing fit min offset (s)",
-    value=float(settings.get(
-        "smps_timing_offset_min_sec",
-        DEFAULT_SETTINGS["smps_timing_offset_min_sec"],
-    )),
-    step=10.0,
-    width=180,
-)
-smps_timing_offset_max_sec = pn.widgets.FloatInput(
-    name="Timing fit max offset (s)",
-    value=float(settings.get(
-        "smps_timing_offset_max_sec",
-        DEFAULT_SETTINGS["smps_timing_offset_max_sec"],
-    )),
-    step=10.0,
-    width=180,
-)
-smps_timing_offset_step_sec = pn.widgets.FloatInput(
-    name="Timing fit step (s)",
-    value=float(settings.get(
-        "smps_timing_offset_step_sec",
-        DEFAULT_SETTINGS["smps_timing_offset_step_sec"],
-    )),
-    step=1.0,
-    width=150,
-)
-smps_timing_match_tolerance_min = pn.widgets.FloatInput(
-    name="SMEAR match tolerance (min)",
-    value=float(settings.get(
-        "smps_timing_match_tolerance_min",
-        DEFAULT_SETTINGS["smps_timing_match_tolerance_min"],
-    )),
-    step=1.0,
-    width=190,
 )
 ntot_plot_max = pn.widgets.FloatInput(
     name="Ntot plot max",
@@ -1297,7 +1180,6 @@ status = pn.pane.Markdown("Status: idle")
 raw_plot = pn.pane.Plotly(height=750, width=1300)
 inversion_plot = pn.pane.Plotly(width=1300)
 difference_plot = pn.pane.Plotly(width=1300)
-smps_timing_plot = pn.pane.Plotly(width=1300, height=1100)
 
 
 def publish_shared_state(
@@ -1763,8 +1645,7 @@ def invert_one_scan(
     d = d.copy()
     d = d[d["Ntot"] == False]
     d["cpc_float"] = pd.to_numeric(d["cpc_count"], errors="coerce")
-    size_col = inversion_size_column(d)
-    d["abs_size_nm"] = pd.to_numeric(d[size_col], errors="coerce").abs()
+    d["abs_size_nm"] = pd.to_numeric(d["size_nm"], errors="coerce").abs()
     d = d.dropna(subset=["abs_size_nm", "cpc_float"])
     d = d[d["cpc_float"] > 0]
     d = d[d["abs_size_nm"] > smallest_size.value]
@@ -1849,7 +1730,6 @@ def run_inversion_calculation(df):
     df["time"] = pd.to_datetime(df["time"], errors="coerce")
     df["abs_size_nm"] = pd.to_numeric(df["size_nm"], errors="coerce").abs()
     df["polarity"] = np.where(df["size_nm"] > 0, "positive", "negative")
-    df = apply_smps_size_shift(df)
 
     size_axis = get_scan_size_axis(df[df["Ntot"] == False])
     output = []
@@ -2650,237 +2530,6 @@ def plot_difference_diagnostics(result):
     return fig
 
 
-def _integrated_heatmap_series(tr, min_size_nm):
-    sizes = np.asarray(tr["y"], dtype=float)
-    z = np.asarray(tr["Z"], dtype=float)
-    size_mask = np.isfinite(sizes) & (sizes >= float(min_size_nm))
-    rows = []
-    if np.count_nonzero(size_mask) < 2:
-        return pd.DataFrame(columns=["time", "ntot"]), sizes[size_mask]
-
-    event_sizes = sizes[size_mask]
-    for t, col in zip(pd.to_datetime(tr["x"]), z.T):
-        ntot = diag.integrate_distribution(event_sizes, np.asarray(col, dtype=float)[size_mask])
-        rows.append((t, ntot))
-    return pd.DataFrame(rows, columns=["time", "ntot"]).dropna(), event_sizes
-
-
-def _smear_integrated_series(smear, event_sizes):
-    rows = []
-    for t, smear_scan in smear.groupby("time"):
-        smear_scan = smear_scan.sort_values("size_nm")
-        smear_sizes = smear_scan["size_nm"].to_numpy(dtype=float)
-        smear_conc = smear_scan["smear_conc"].to_numpy(dtype=float)
-        valid = np.isfinite(smear_sizes) & np.isfinite(smear_conc) & (smear_conc > 0)
-        if np.count_nonzero(valid) < 2:
-            continue
-        interp = np.interp(
-            event_sizes,
-            smear_sizes[valid],
-            smear_conc[valid],
-            left=np.nan,
-            right=np.nan,
-        )
-        rows.append((pd.Timestamp(t), diag.integrate_distribution(event_sizes, interp)))
-    return pd.DataFrame(rows, columns=["time", "smear_ntot"]).dropna()
-
-
-def _match_smps_timing(our, smear_ntot, offset_sec, tolerance_min):
-    shifted = our.copy()
-    shifted["match_time"] = shifted["time"] + pd.to_timedelta(float(offset_sec), unit="s")
-    smear_for_match = smear_ntot.rename(columns={"time": "smear_time"}).copy()
-    smear_for_match["match_time"] = smear_for_match["smear_time"]
-    matched = pd.merge_asof(
-        shifted.sort_values("match_time"),
-        smear_for_match.sort_values("match_time"),
-        on="match_time",
-        direction="nearest",
-        tolerance=pd.Timedelta(minutes=float(tolerance_min)),
-    ).dropna(subset=["ntot", "smear_ntot"])
-    matched = matched[(matched["ntot"] > 0) & (matched["smear_ntot"] > 0)].copy()
-    if matched.empty:
-        return matched, np.nan, np.nan
-
-    log_ratio = np.log10(matched["ntot"].to_numpy(dtype=float) / matched["smear_ntot"].to_numpy(dtype=float))
-    rmse = float(np.sqrt(np.nanmean(log_ratio ** 2)))
-    corr = np.nan
-    if len(matched) >= 3:
-        corr = float(np.corrcoef(
-            np.log10(matched["ntot"].to_numpy(dtype=float)),
-            np.log10(matched["smear_ntot"].to_numpy(dtype=float)),
-        )[0, 1])
-    return matched, rmse, corr
-
-
-def plot_smps_timing_diagnostics(result=None, event=None):
-    result = latest_inversion if result is None else result
-    if result is None:
-        status.object = "Run an inversion before plotting SMPS timing diagnostics."
-        return None
-
-    heatmaps = [tr for tr in result if tr.get("kind") == "heatmap"]
-    t0, t1 = result_time_range(result)
-    if not heatmaps or t0 is None:
-        smps_timing_plot.object = None
-        status.object = "No inversion heatmaps available for SMPS timing diagnostics."
-        return None
-
-    offset_min = float(smps_timing_offset_min_sec.value)
-    offset_max = float(smps_timing_offset_max_sec.value)
-    offset_step = abs(float(smps_timing_offset_step_sec.value))
-    tolerance_min = max(0.1, float(smps_timing_match_tolerance_min.value))
-    if offset_step <= 0 or not np.isfinite(offset_step):
-        offset_step = 10.0
-    if offset_min > offset_max:
-        offset_min, offset_max = offset_max, offset_min
-
-    offsets = np.arange(offset_min, offset_max + 0.5 * offset_step, offset_step)
-    smear = load_smeariii_sum_range(
-        t0 - pd.Timedelta(minutes=tolerance_min) + pd.to_timedelta(offset_min, unit="s"),
-        t1 + pd.Timedelta(minutes=tolerance_min) + pd.to_timedelta(offset_max, unit="s"),
-    )
-    if smear.empty:
-        smps_timing_plot.object = None
-        status.object = "No SMEAR III size distribution data found for SMPS timing diagnostics."
-        return None
-
-    fig = make_subplots(
-        rows=4,
-        cols=1,
-        shared_xaxes=False,
-        vertical_spacing=0.07,
-        subplot_titles=[
-            "Our inverted Ntot and SMEAR Ntot at best timing offset",
-            "Timing fit error vs offset",
-            "Timing fit correlation vs offset",
-            "Best-offset Ntot scatter",
-        ],
-    )
-    summaries = []
-
-    for tr in heatmaps:
-        label = f"{method_label(tr.get('method', 'gunn woessner mod'))} {tr.get('polarity', 'unknown')}"
-        our, event_sizes = _integrated_heatmap_series(tr, float(smallest_size.value))
-        if our.empty or len(event_sizes) < 2:
-            continue
-        smear_ntot = _smear_integrated_series(smear, event_sizes)
-        if smear_ntot.empty:
-            continue
-
-        scores = []
-        matches_by_offset = {}
-        for offset in offsets:
-            matched, rmse, corr = _match_smps_timing(our, smear_ntot, offset, tolerance_min)
-            scores.append((offset, rmse, corr, len(matched)))
-            matches_by_offset[float(offset)] = matched
-
-        score_df = pd.DataFrame(scores, columns=["offset_sec", "log_rmse", "corr", "n"])
-        valid_scores = score_df[np.isfinite(score_df["log_rmse"])]
-        if valid_scores.empty:
-            continue
-        best = valid_scores.sort_values(["log_rmse", "offset_sec"]).iloc[0]
-        best_offset = float(best["offset_sec"])
-        best_matched = matches_by_offset[best_offset]
-        summaries.append(f"{label}: best {best_offset:.0f} s, logRMSE {best['log_rmse']:.3f}, r {best['corr']:.3f}, n {int(best['n'])}")
-
-        fig.add_scatter(
-            x=smear_ntot["time"],
-            y=smear_ntot["smear_ntot"],
-            mode="lines",
-            name=f"SMEAR {label}",
-            row=1,
-            col=1,
-        )
-        fig.add_scatter(
-            x=our["time"],
-            y=our["ntot"],
-            mode="lines+markers",
-            line=dict(dash="dot"),
-            name=f"Our raw time {label}",
-            row=1,
-            col=1,
-        )
-        fig.add_scatter(
-            x=our["time"] + pd.to_timedelta(best_offset, unit="s"),
-            y=our["ntot"],
-            mode="lines+markers",
-            name=f"Our best {best_offset:.0f}s {label}",
-            row=1,
-            col=1,
-        )
-        fig.add_scatter(
-            x=score_df["offset_sec"],
-            y=score_df["log_rmse"],
-            mode="lines+markers",
-            name=f"RMSE {label}",
-            customdata=np.column_stack((score_df["n"], score_df["corr"])),
-            hovertemplate="offset=%{x:.0f}s<br>logRMSE=%{y:.3f}<br>matches=%{customdata[0]:.0f}<br>r=%{customdata[1]:.3f}<extra></extra>",
-            row=2,
-            col=1,
-        )
-        fig.add_scatter(
-            x=[best_offset],
-            y=[best["log_rmse"]],
-            mode="markers",
-            marker=dict(symbol="diamond", size=12),
-            name=f"Best RMSE {label}",
-            row=2,
-            col=1,
-        )
-        fig.add_scatter(
-            x=score_df["offset_sec"],
-            y=score_df["corr"],
-            mode="lines+markers",
-            name=f"Correlation {label}",
-            row=3,
-            col=1,
-        )
-        if not best_matched.empty:
-            fig.add_scatter(
-                x=best_matched["ntot"],
-                y=best_matched["smear_ntot"],
-                mode="markers",
-                name=f"Best scatter {label}",
-                customdata=diag.plotly_customdata(best_matched["time"], best_matched["smear_time"]),
-                hovertemplate=(
-                    "our time=%{customdata[0]|%Y-%m-%d %H:%M:%S}<br>"
-                    "matched SMEAR time=%{customdata[1]|%Y-%m-%d %H:%M:%S}<br>"
-                    "our N=%{x:.2f}<br>SMEAR N=%{y:.2f}<extra></extra>"
-                ),
-                row=4,
-                col=1,
-            )
-
-    if not summaries:
-        smps_timing_plot.object = None
-        status.object = "No valid SMPS/SMEAR matches for timing diagnostics."
-        return None
-
-    fig.update_yaxes(title_text="Ntot", row=1, col=1)
-    fig.update_xaxes(title_text="Time", tickformat="%H:%M", row=1, col=1)
-    fig.update_yaxes(title_text="log10 ratio RMSE", row=2, col=1)
-    fig.update_xaxes(title_text="Offset applied to our data (s)", row=2, col=1)
-    fig.update_yaxes(title_text="log10 N correlation", row=3, col=1)
-    fig.update_xaxes(title_text="Offset applied to our data (s)", row=3, col=1)
-    fig.update_xaxes(title_text="Our inverted Ntot", row=4, col=1)
-    fig.update_yaxes(title_text="SMEAR integrated Ntot", row=4, col=1)
-    fig.update_layout(
-        height=1300,
-        width=1300,
-        title="SMPS timing diagnostics: " + " | ".join(summaries),
-        showlegend=True,
-        margin=dict(l=50, r=260, t=90, b=40),
-        legend=dict(x=1.02, y=1.0),
-    )
-    smps_timing_plot.object = fig
-    status.object = "SMPS timing diagnostics updated. " + " | ".join(summaries)
-    return fig
-
-
-def update_smps_timing_plot(event=None):
-    return plot_smps_timing_diagnostics()
-
-
 def run_inversion(event=None):
     global inversion_running
 
@@ -2910,7 +2559,6 @@ def run_inversion(event=None):
 
                 fig = plot_inversion_result(result)
                 diff_fig = plot_difference_diagnostics(result)
-                plot_smps_timing_diagnostics(result)
 
                 if auto_checkbox.value:
                     save_data()
@@ -3016,7 +2664,6 @@ def run_auto_worker():
                 latest_inversion = result
                 fig = plot_inversion_result(result)
                 diff_fig = plot_difference_diagnostics(result)
-                plot_smps_timing_diagnostics(result)
                 save_data()
                 save_auto_state({"last_saved_signature": signature})
                 publish_shared_state(
@@ -3038,7 +2685,6 @@ def run_auto_worker():
 
 save_button.on_click(save_data)
 invert_button.on_click(run_inversion)
-smps_timing_button.on_click(update_smps_timing_plot)
 
 
 for w in [
@@ -3075,12 +2721,6 @@ for w in [
     growth_threshold_fraction,
     difference_peak_min_size_nm,
     smallest_size,
-    scan_inversion_type,
-    smps_settling_time_sec,
-    smps_timing_offset_min_sec,
-    smps_timing_offset_max_sec,
-    smps_timing_offset_step_sec,
-    smps_timing_match_tolerance_min,
     tube_segments,
     inversion_methods,
 ]:
@@ -3097,19 +2737,16 @@ controls = pn.Column(
     pn.Row(dma_L, dma_r1, dma_r2),
     pn.Row(qa_lpm, qs_lpm, temp_K, press_Pa),
     pn.Row(zratio_widget, zratio_min_widget, zratio_max_widget, zratio_smoothing_step, zratio_min_size_nm, zratio_estimate_offset, use_zratio_checkbox),
-    pn.Row(scan_inversion_type, smps_settling_time_sec),
-    pn.Row(smps_timing_offset_min_sec, smps_timing_offset_max_sec, smps_timing_offset_step_sec, smps_timing_match_tolerance_min),
     pn.Row(ntot_plot_max, heatmap_clip, smallest_size),
     pn.Row(raw_uncertainty, growth_method, growth_min_size_nm, growth_max_size_nm, growth_threshold_fraction, difference_peak_min_size_nm),
     tube_segments,
     inversion_methods,
-    pn.Row(plot_button, invert_button, smps_timing_button, save_button, status),
+    pn.Row(plot_button, invert_button, save_button, status),
 )
 
 plot_tabs = pn.Tabs(
     ("Raw Data", pn.Column(raw_plot)),
     ("Inversion", pn.Column(inversion_plot)),
-    ("SMPS Timing", pn.Column(smps_timing_plot)),
     ("Difference Diagnostics", pn.Column(difference_plot)),
     dynamic=True,
 )
