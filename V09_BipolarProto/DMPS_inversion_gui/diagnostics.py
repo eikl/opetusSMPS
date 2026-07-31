@@ -239,6 +239,34 @@ def build_growth_rate_diagnostics(
 ):
     diagnostics = []
 
+    def fit_track(label, polarity, method, times, sizes):
+        mode_times = pd.to_datetime(times)
+        mode_sizes = np.asarray(sizes, dtype=float)
+        hours = (mode_times - mode_times[0]).total_seconds() / 3600.0
+        finite = np.isfinite(hours) & np.isfinite(mode_sizes) & (mode_sizes > 0)
+        if np.count_nonzero(finite) < 3 or np.nanmax(hours[finite]) <= np.nanmin(hours[finite]):
+            return None
+        fit_y = np.log(mode_sizes[finite]) if method == "log-size fit" else mode_sizes[finite]
+        slope, intercept = np.polyfit(hours[finite], fit_y, 1)
+        fit = np.exp(intercept + slope * hours[finite]) if method == "log-size fit" else intercept + slope * hours[finite]
+        residual = mode_sizes[finite] - fit
+        ss_res = np.nansum(residual ** 2)
+        ss_tot = np.nansum((mode_sizes[finite] - np.nanmean(mode_sizes[finite])) ** 2)
+        r2 = 1.0 - ss_res / ss_tot if ss_tot > 0 else np.nan
+        if method == "log-size fit":
+            growth_rate = float(np.nanmedian(slope * fit))
+        else:
+            growth_rate = float(slope)
+        return {
+            "label": f"{label} {polarity}",
+            "time": mode_times[finite],
+            "dp": mode_sizes[finite],
+            "fit": fit,
+            "growth_rate": growth_rate,
+            "r2": r2,
+            "n_points": int(np.count_nonzero(finite)),
+        }
+
     for tr in result:
         if tr.get("kind") != "heatmap":
             continue
@@ -259,9 +287,37 @@ def build_growth_rate_diagnostics(
 
         event_sizes = sizes[size_mask]
         event_z = z[size_mask, :]
+        threshold_fraction = np.clip(float(growth_threshold_fraction), 0.0, 1.0)
+
+        label = method_label(tr.get('method', 'gunn woessner mod'))
+        polarity = tr['polarity']
+
+        if growth_method == "appearance time":
+            mode_sizes = []
+            mode_times = []
+            baseline_n = max(1, int(np.ceil(event_z.shape[1] * 0.2)))
+            for size_nm, row in zip(event_sizes, event_z):
+                row = np.asarray(row, dtype=float)
+                finite = np.isfinite(row) & (row > 0)
+                if np.count_nonzero(finite) < 3:
+                    continue
+                baseline = np.nanmedian(row[:baseline_n])
+                peak = np.nanmax(row)
+                threshold = baseline + threshold_fraction * (peak - baseline)
+                hits = np.flatnonzero(finite & (row >= threshold))
+                if len(hits) and np.isfinite(threshold) and peak > baseline:
+                    mode_sizes.append(size_nm)
+                    mode_times.append(times[hits[0]])
+
+            if len(mode_sizes) < 3:
+                continue
+            diagnostic = fit_track(label, polarity, growth_method, mode_times, mode_sizes)
+            if diagnostic is not None:
+                diagnostics.append(diagnostic)
+            continue
+
         mode_sizes = []
         mode_times = []
-        threshold_fraction = np.clip(float(growth_threshold_fraction), 0.0, 1.0)
 
         for t, col in zip(times, event_z.T):
             col = np.asarray(col, dtype=float)
@@ -278,6 +334,12 @@ def build_growth_rate_diagnostics(
 
             if growth_method == "peak size":
                 dp = event_sizes[int(np.nanargmax(col))]
+            elif growth_method == "quantile D50":
+                order = np.argsort(event_sizes[active])
+                active_sizes = event_sizes[active][order]
+                active_weights = col[active][order]
+                cumulative = np.cumsum(active_weights)
+                dp = np.interp(0.5 * cumulative[-1], cumulative, active_sizes)
             else:
                 weights = col[active]
                 dp = np.average(event_sizes[active], weights=weights)
@@ -288,29 +350,38 @@ def build_growth_rate_diagnostics(
 
         if len(mode_sizes) < 3:
             continue
-
-        mode_times = pd.to_datetime(mode_times)
-        mode_sizes = np.asarray(mode_sizes, dtype=float)
-        hours = (mode_times - mode_times[0]).total_seconds() / 3600.0
-        finite = np.isfinite(hours) & np.isfinite(mode_sizes)
-        if np.count_nonzero(finite) < 3 or np.nanmax(hours[finite]) <= np.nanmin(hours[finite]):
+        if growth_method == "sliding window":
+            mode_times = pd.to_datetime(mode_times)
+            mode_sizes = np.asarray(mode_sizes, dtype=float)
+            hours = (mode_times - mode_times[0]).total_seconds() / 3600.0
+            finite = np.isfinite(hours) & np.isfinite(mode_sizes)
+            local_fit = np.full(len(mode_sizes), np.nan)
+            local_rates = []
+            for i in range(len(mode_sizes)):
+                lo = max(0, i - 2)
+                hi = min(len(mode_sizes), i + 3)
+                local = finite[lo:hi]
+                if np.count_nonzero(local) < 3:
+                    continue
+                slope, intercept = np.polyfit(hours[lo:hi][local], mode_sizes[lo:hi][local], 1)
+                local_fit[i] = intercept + slope * hours[i]
+                local_rates.append(slope)
+            if np.count_nonzero(np.isfinite(local_fit)) < 3:
+                continue
+            diagnostics.append({
+                "label": f"{label} {polarity}",
+                "time": mode_times[np.isfinite(local_fit)],
+                "dp": mode_sizes[np.isfinite(local_fit)],
+                "fit": local_fit[np.isfinite(local_fit)],
+                "growth_rate": float(np.nanmedian(local_rates)) if local_rates else np.nan,
+                "r2": np.nan,
+                "n_points": int(np.count_nonzero(np.isfinite(local_fit))),
+            })
             continue
 
-        slope, intercept = np.polyfit(hours[finite], mode_sizes[finite], 1)
-        fit = intercept + slope * hours[finite]
-        residual = mode_sizes[finite] - fit
-        ss_res = np.nansum(residual ** 2)
-        ss_tot = np.nansum((mode_sizes[finite] - np.nanmean(mode_sizes[finite])) ** 2)
-        r2 = 1.0 - ss_res / ss_tot if ss_tot > 0 else np.nan
-        diagnostics.append({
-            "label": f"{method_label(tr.get('method', 'gunn woessner mod'))} {tr['polarity']}",
-            "time": mode_times[finite],
-            "dp": mode_sizes[finite],
-            "fit": fit,
-            "growth_rate": slope,
-            "r2": r2,
-            "n_points": int(np.count_nonzero(finite)),
-        })
+        diagnostic = fit_track(label, polarity, growth_method, mode_times, mode_sizes)
+        if diagnostic is not None:
+            diagnostics.append(diagnostic)
 
     return diagnostics
 

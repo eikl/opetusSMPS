@@ -32,7 +32,7 @@ from inv_funcs.ltubefl import ltubefl
 
 APP_ROOT = Path(__file__).resolve().parents[1]
 SETTINGS_FILE = APP_ROOT / "settings_inversion.json"
-APP_VERSION = "2026-07-09-original-inversion-convention"
+APP_VERSION = "2026-07-31-diagnostics-tabs"
 
 DEFAULT_SETTINGS = {
     "scan_root": "logs/scans",
@@ -103,17 +103,20 @@ shared_state = pn.state.cache.setdefault(
         "version": 0,
         "raw_fig": None,
         "inversion_fig": None,
+        "residual_fig": None,
         "difference_fig": None,
         "difference_diagnostics": None,
         "latest_inversion": None,
         "status": "Status: idle",
     },
 )
+shared_state.setdefault("residual_fig", None)
 with shared_state["lock"]:
     local_shared_version = (
         shared_state["version"]
         if shared_state["raw_fig"] is None
         and shared_state["inversion_fig"] is None
+        and shared_state["residual_fig"] is None
         and shared_state["difference_fig"] is None
         and shared_state["latest_inversion"] is None
         else -1
@@ -291,6 +294,8 @@ def save_data(event=None):
         raw_plot.object.write_html(outdir / f"raw_plot_{stamp}.html")
     if inversion_plot.object is not None:
         inversion_plot.object.write_html(outdir / f"inversion_plot_{stamp}.html")
+    if residual_plot.object is not None:
+        residual_plot.object.write_html(outdir / f"residual_diagnostics_{stamp}.html")
     if difference_plot.object is not None:
         difference_plot.object.write_html(outdir / f"difference_diagnostics_{stamp}.html")
     if smps_timing_plot.object is not None:
@@ -1241,7 +1246,14 @@ raw_uncertainty = pn.widgets.Select(
 )
 growth_method = pn.widgets.Select(
     name="Growth method",
-    options=["weighted centroid", "peak size"],
+    options=[
+        "weighted centroid",
+        "peak size",
+        "appearance time",
+        "sliding window",
+        "quantile D50",
+        "log-size fit",
+    ],
     value=settings.get("growth_method", DEFAULT_SETTINGS["growth_method"]),
     width=180,
 )
@@ -1296,6 +1308,7 @@ status = pn.pane.Markdown("Status: idle")
 
 raw_plot = pn.pane.Plotly(height=750, width=1300)
 inversion_plot = pn.pane.Plotly(width=1300)
+residual_plot = pn.pane.Plotly(width=1300, height=1200)
 difference_plot = pn.pane.Plotly(width=1300)
 smps_timing_plot = pn.pane.Plotly(width=1300, height=1100)
 
@@ -1304,6 +1317,7 @@ def publish_shared_state(
     *,
     raw_fig=None,
     inversion_fig=None,
+    residual_fig=None,
     difference_fig=None,
     difference_diagnostics=None,
     inversion_result=None,
@@ -1314,6 +1328,8 @@ def publish_shared_state(
             shared_state["raw_fig"] = raw_fig
         if inversion_fig is not None:
             shared_state["inversion_fig"] = inversion_fig
+        if residual_fig is not None:
+            shared_state["residual_fig"] = residual_fig
         if difference_fig is not None:
             shared_state["difference_fig"] = difference_fig
         if difference_diagnostics is not None:
@@ -1334,6 +1350,7 @@ def sync_shared_state():
             return
         raw_fig = shared_state["raw_fig"]
         inversion_fig = shared_state["inversion_fig"]
+        residual_fig = shared_state["residual_fig"]
         difference_fig = shared_state["difference_fig"]
         difference_diagnostics = shared_state["difference_diagnostics"]
         inversion_result = shared_state["latest_inversion"]
@@ -1343,6 +1360,8 @@ def sync_shared_state():
         raw_plot.object = copy.deepcopy(raw_fig)
     if inversion_fig is not None:
         inversion_plot.object = copy.deepcopy(inversion_fig)
+    if residual_fig is not None:
+        residual_plot.object = copy.deepcopy(residual_fig)
     if difference_fig is not None:
         difference_plot.object = copy.deepcopy(difference_fig)
     if difference_diagnostics is not None:
@@ -1837,10 +1856,22 @@ def invert_one_scan(
         A[i, :] = halfs * (vals @ _GL_WEIGHTS)
 
     x, _ = nnls(A, y)
+    y_fit = A @ x
+    residual = y - y_fit
+    residual_rel = np.divide(
+        residual,
+        y,
+        out=np.full(len(y), np.nan),
+        where=y != 0,
+    )
 
     return pd.DataFrame({
         "abs_size_nm": dp_grid_nm,
         "N_GWalpha": x,
+        "measured_cpc": y,
+        "fitted_cpc": y_fit,
+        "residual_cpc": residual,
+        "residual_rel": residual_rel,
     })
 
 
@@ -1881,6 +1912,7 @@ def run_inversion_calculation(df):
             heat_flow_rel_rmse = []
             ntot_vals = []
             ntot_measured = []
+            residual_rows = []
 
             for scan_id, g_scan in dd.groupby(group_key):
                 zratio = zratios.get(scan_id, np.nan)
@@ -1921,6 +1953,20 @@ def run_inversion_calculation(df):
 
                     dp_inv = invdf["abs_size_nm"].to_numpy(dtype=float)
                     n_inv = invdf["N_GWalpha"].to_numpy(dtype=float)
+
+                    for row in invdf.itertuples(index=False):
+                        residual_rows.append({
+                            "time": g_scan["time"].median(),
+                            "scan_id": scan_id,
+                            "scan_range": g_range["scan_range"].iloc[0],
+                            "method": inversion_method,
+                            "polarity": polarity,
+                            "abs_size_nm": float(row.abs_size_nm),
+                            "measured_cpc": float(row.measured_cpc),
+                            "fitted_cpc": float(row.fitted_cpc),
+                            "residual_cpc": float(row.residual_cpc),
+                            "residual_rel": float(row.residual_rel),
+                        })
 
                     order = np.argsort(dp_inv)
                     ntot_scan += np.trapezoid(n_inv[order], np.log10(dp_inv[order]))
@@ -1976,6 +2022,13 @@ def run_inversion_calculation(df):
                     "y": ntot_vals,
                     "y_measured": ntot_measured,
                 })
+
+            output.append({
+                "kind": "residuals",
+                "method": inversion_method,
+                "polarity": polarity,
+                "rows": residual_rows,
+            })
 
     output.append({
         "kind": "ion_ratio",
@@ -2514,6 +2567,168 @@ def plot_inversion_result(result):
     return fig
 
 
+def plot_residual_diagnostics(result):
+    residual_rows = []
+    for tr in result:
+        if tr.get("kind") == "residuals" and tr.get("rows"):
+            residual_rows.extend(tr["rows"])
+
+    if not residual_rows:
+        residual_plot.object = None
+        return None
+
+    df = pd.DataFrame(residual_rows)
+    df["time"] = pd.to_datetime(df["time"], errors="coerce")
+    for col in ["abs_size_nm", "measured_cpc", "fitted_cpc", "residual_cpc", "residual_rel"]:
+        df[col] = pd.to_numeric(df[col], errors="coerce")
+    df = df.dropna(subset=["time", "abs_size_nm", "measured_cpc", "fitted_cpc"])
+    if df.empty:
+        residual_plot.object = None
+        return None
+
+    summaries = (
+        df.groupby(["method", "polarity", "scan_id", "time"], as_index=False)
+        .agg(
+            rmse=("residual_cpc", lambda x: float(np.sqrt(np.nanmean(np.square(x))))),
+            median_abs_rel=("residual_rel", lambda x: float(np.nanmedian(np.abs(x)))),
+            n=("residual_cpc", "size"),
+        )
+        .sort_values("time")
+    )
+
+    heatmap_keys = list(df.groupby(["method", "polarity"]).groups.keys())
+    rows = 3 + len(heatmap_keys)
+    fig = make_subplots(
+        rows=rows,
+        cols=1,
+        vertical_spacing=min(0.03, 0.16 / max(1, rows - 1)),
+        subplot_titles=(
+            [
+                "Measured CPC vs fitted CPC",
+                "Residual CPC vs size",
+                "Per-scan inversion residual summary",
+            ]
+            + [f"{method_label(method)} {polarity} relative residual heatmap" for method, polarity in heatmap_keys]
+        ),
+    )
+
+    scatter_max = float(np.nanmax(df[["measured_cpc", "fitted_cpc"]].to_numpy(dtype=float)))
+    for (method, polarity), g in df.groupby(["method", "polarity"]):
+        label = f"{method_label(method)} {polarity}"
+        fig.add_scatter(
+            x=g["measured_cpc"],
+            y=g["fitted_cpc"],
+            mode="markers",
+            name=f"{label} fit closure",
+            customdata=diag.plotly_customdata(g["time"], g["scan_id"], g["abs_size_nm"], g["residual_rel"]),
+            hovertemplate=(
+                "time=%{customdata[0]|%Y-%m-%d %H:%M}<br>"
+                "scan=%{customdata[1]}<br>"
+                "dp=%{customdata[2]:.2f} nm<br>"
+                "measured=%{x:.2f}<br>"
+                "fitted=%{y:.2f}<br>"
+                "relative residual=%{customdata[3]:.2%}<extra></extra>"
+            ),
+            row=1,
+            col=1,
+        )
+        fig.add_scatter(
+            x=g["abs_size_nm"],
+            y=g["residual_cpc"],
+            mode="markers",
+            name=f"{label} residual",
+            customdata=diag.plotly_customdata(g["time"], g["scan_id"], g["measured_cpc"], g["fitted_cpc"]),
+            hovertemplate=(
+                "time=%{customdata[0]|%Y-%m-%d %H:%M}<br>"
+                "scan=%{customdata[1]}<br>"
+                "dp=%{x:.2f} nm<br>"
+                "residual=%{y:.2f}<br>"
+                "measured=%{customdata[2]:.2f}<br>"
+                "fitted=%{customdata[3]:.2f}<extra></extra>"
+            ),
+            row=2,
+            col=1,
+        )
+
+    if np.isfinite(scatter_max) and scatter_max > 0:
+        fig.add_scatter(
+            x=[0, scatter_max],
+            y=[0, scatter_max],
+            mode="lines",
+            line=dict(color="black", dash="dash"),
+            name="1:1 fitted CPC",
+            row=1,
+            col=1,
+        )
+
+    for (method, polarity), g in summaries.groupby(["method", "polarity"]):
+        label = f"{method_label(method)} {polarity}"
+        fig.add_scatter(
+            x=g["time"],
+            y=g["rmse"],
+            mode="lines+markers",
+            name=f"{label} RMSE",
+            customdata=diag.plotly_customdata(g["scan_id"], g["median_abs_rel"], g["n"]),
+            hovertemplate=(
+                "scan=%{customdata[0]}<br>"
+                "time=%{x|%Y-%m-%d %H:%M}<br>"
+                "RMSE=%{y:.2f}<br>"
+                "median |rel residual|=%{customdata[1]:.2%}<br>"
+                "points=%{customdata[2]:.0f}<extra></extra>"
+            ),
+            row=3,
+            col=1,
+        )
+
+    for i, (method, polarity) in enumerate(heatmap_keys, start=4):
+        g = df[(df["method"] == method) & (df["polarity"] == polarity)].copy()
+        pivot = (
+            g.pivot_table(
+                index="abs_size_nm",
+                columns="time",
+                values="residual_rel",
+                aggfunc="median",
+            )
+            .sort_index()
+        )
+        if pivot.empty:
+            continue
+        z = np.clip(pivot.to_numpy(dtype=float), -1.0, 1.0)
+        fig.add_heatmap(
+            z=z,
+            x=list(pivot.columns),
+            y=pivot.index.to_numpy(dtype=float),
+            zmin=-1,
+            zmax=1,
+            colorscale="RdBu",
+            reversescale=True,
+            colorbar=dict(title="rel residual", len=0.25),
+            name=f"{method_label(method)} {polarity} rel residual",
+            hovertemplate="time=%{x|%Y-%m-%d %H:%M}<br>dp=%{y:.2f} nm<br>relative residual=%{z:.2%}<extra></extra>",
+            row=i,
+            col=1,
+        )
+        update_log_size_axis(fig, i, pivot.index.to_numpy(dtype=float))
+        fig.update_xaxes(title_text="Time", tickformat="%H:%M", row=i, col=1)
+
+    fig.update_xaxes(title_text="Measured CPC", row=1, col=1)
+    fig.update_yaxes(title_text="Fitted CPC", row=1, col=1)
+    fig.update_xaxes(type="log", title_text="Dp (nm)", row=2, col=1)
+    fig.update_yaxes(title_text="Measured - fitted CPC", row=2, col=1)
+    fig.update_xaxes(title_text="Time", tickformat="%H:%M", row=3, col=1)
+    fig.update_yaxes(title_text="CPC RMSE", row=3, col=1)
+    fig.update_layout(
+        height=max(1200, 430 * rows),
+        width=1300,
+        title="Inversion residual diagnostics",
+        showlegend=True,
+        margin=dict(l=50, r=260, t=70, b=40),
+        legend=dict(x=1.02, y=1.0),
+    )
+    residual_plot.object = fig
+    return fig
+
+
 def plot_difference_diagnostics(result):
     global latest_difference_diagnostics
 
@@ -2909,6 +3124,7 @@ def run_inversion(event=None):
                 global auto_pending_signature
 
                 fig = plot_inversion_result(result)
+                residual_fig = plot_residual_diagnostics(result)
                 diff_fig = plot_difference_diagnostics(result)
                 plot_smps_timing_diagnostics(result)
 
@@ -2924,6 +3140,7 @@ def run_inversion(event=None):
                 status.object = status_text
                 publish_shared_state(
                     inversion_fig=fig,
+                    residual_fig=residual_fig,
                     difference_fig=diff_fig,
                     difference_diagnostics=latest_difference_diagnostics,
                     inversion_result=result,
@@ -3015,12 +3232,14 @@ def run_auto_worker():
 
                 latest_inversion = result
                 fig = plot_inversion_result(result)
+                residual_fig = plot_residual_diagnostics(result)
                 diff_fig = plot_difference_diagnostics(result)
                 plot_smps_timing_diagnostics(result)
                 save_data()
                 save_auto_state({"last_saved_signature": signature})
                 publish_shared_state(
                     inversion_fig=fig,
+                    residual_fig=residual_fig,
                     difference_fig=diff_fig,
                     difference_diagnostics=latest_difference_diagnostics,
                     inversion_result=result,
@@ -3087,28 +3306,48 @@ for w in [
     w.param.watch(lambda event: save_settings(), "value")
 
 
-controls = pn.Column(
+selection_controls = pn.Column(
     pn.Row(scan_root, refresh_button, select_last_button, n_scans_plot),
     pn.Row(scan_selection_mode, scan_start_date, scan_start_time, scan_end_date, scan_end_time),
-    pn.Row(save_root),
-    pn.Row(auto_checkbox, daily_overwrite_checkbox, auto_interval_min, auto_file_age_sec),
     pn.Accordion(("Selected scan CSVs", scan_files), active=[]),
-    "### DMA / inversion settings",
+)
+
+inversion_controls = pn.Column(
     pn.Row(dma_L, dma_r1, dma_r2),
     pn.Row(qa_lpm, qs_lpm, temp_K, press_Pa),
-    pn.Row(zratio_widget, zratio_min_widget, zratio_max_widget, zratio_smoothing_step, zratio_min_size_nm, zratio_estimate_offset, use_zratio_checkbox),
-    pn.Row(scan_inversion_type, smps_settling_time_sec),
-    pn.Row(smps_timing_offset_min_sec, smps_timing_offset_max_sec, smps_timing_offset_step_sec, smps_timing_match_tolerance_min),
-    pn.Row(ntot_plot_max, heatmap_clip, smallest_size),
-    pn.Row(raw_uncertainty, growth_method, growth_min_size_nm, growth_max_size_nm, growth_threshold_fraction, difference_peak_min_size_nm),
+    pn.Row(zratio_widget, zratio_min_widget, zratio_max_widget, zratio_smoothing_step),
+    pn.Row(zratio_min_size_nm, zratio_estimate_offset, use_zratio_checkbox, smallest_size),
+    pn.Row(scan_inversion_type, smps_settling_time_sec, inversion_methods),
     tube_segments,
-    inversion_methods,
+)
+
+diagnostic_controls = pn.Column(
+    pn.Row(ntot_plot_max, heatmap_clip, raw_uncertainty),
+    pn.Row(growth_method, growth_min_size_nm, growth_max_size_nm, growth_threshold_fraction),
+    pn.Row(difference_peak_min_size_nm),
+    pn.Row(smps_timing_offset_min_sec, smps_timing_offset_max_sec, smps_timing_offset_step_sec, smps_timing_match_tolerance_min),
+)
+
+automation_controls = pn.Column(
+    pn.Row(save_root),
+    pn.Row(auto_checkbox, daily_overwrite_checkbox, auto_interval_min, auto_file_age_sec),
+)
+
+controls = pn.Column(
+    pn.Tabs(
+        ("Scan Selection", selection_controls),
+        ("Inversion Settings", inversion_controls),
+        ("Diagnostics", diagnostic_controls),
+        ("Automation / Save", automation_controls),
+        dynamic=True,
+    ),
     pn.Row(plot_button, invert_button, smps_timing_button, save_button, status),
 )
 
 plot_tabs = pn.Tabs(
     ("Raw Data", pn.Column(raw_plot)),
     ("Inversion", pn.Column(inversion_plot)),
+    ("Residuals", pn.Column(residual_plot)),
     ("SMPS Timing", pn.Column(smps_timing_plot)),
     ("Difference Diagnostics", pn.Column(difference_plot)),
     dynamic=True,
